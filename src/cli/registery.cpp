@@ -1,8 +1,8 @@
 #include "cli.hpp"
 
 namespace mokai {
-void cli::initCommands() {
-  supportedCommands = {
+void Cli::initCommands() {
+  m_supported_commands = {
       {"create",
        {CREATEUSEANDEXPLANATION,
         [this](auto &args) { handleCreateProject(args); }}},
