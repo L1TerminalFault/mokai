@@ -12,10 +12,12 @@ cpp_version = "c++20"
 [target.myapp]
 type = "executable"
 sources = ["./main.cpp"]
-```
 
 ```
+
+```bash
 mokai build
+
 ```
 
 That's a complete, working project.
@@ -26,44 +28,47 @@ That's a complete, working project.
 
 ## Why Mokai
 
-C++ build tooling has a real, well-known problem: CMake is powerful but unfriendly to learn, generates intermediate files for other tools to consume, and has no built-in package manager. Alternatives exist, but none combine **a real package manager**, **zero new syntax to learn**, and **a fast, in-process build** in one tool.
+C++ build tooling has a real, well-known problem: CMake is powerful but has a steep learning curve, requires generating intermediate build files, and lacks an integrated package manager. Alternatives exist, but few combine **a real package manager**, **zero new syntax to learn**, and **a fast, in-process build** in one unified tool.
 
 Mokai's approach:
 
-- **TOML, not a scripting language.** Your project is data — targets, sources, dependencies — not a program the build system has to execute.
-- **No intermediate generator step.** Mokai compiles and links directly. No Makefiles or `.ninja` files are generated and handed off to a second tool.
-- **Dependencies that just work.** Depend on a library by name. Mokai resolves it — locally, from git, or eventually from a recipe registry — and wires up the right include paths, libraries, and link order automatically.
-- **Caching by default.** File content hashing plus timestamps means unchanged files are never recompiled. Independent targets and sources compile in parallel.
-- **Errors that try to help.** Validation errors point at the exact line and field that's wrong, with a hint where possible — not a wall of templated output.
+* **TOML, not a scripting language.** Your project is data — targets, sources, dependencies — not a program the build system has to execute.
+* **No intermediate generator step.** Mokai compiles and links directly. No Makefiles or `.ninja` files are generated and handed off to a second tool.
+* **Dependencies that just work.** Depend on a library by name. Mokai resolves it — locally, from git, or eventually from a recipe registry — and wires up the right include paths, libraries, and link order automatically.
+* **Caching by default.** File content hashing plus timestamps means unchanged files are never recompiled. Independent targets and sources compile in parallel.
+* **Clear, actionable errors.** Validation errors point at the exact line and field that failed, providing a helpful hint where possible rather than a wall of compiler output.
 
 ## What works today
 
-- TOML-based project manifests (`mokai.toml`) with targets, file groups, property groups, conditional sources/flags/defines, and hooks
-- Local path and git-based dependency resolution, recursive across nested projects
-- Automatic dependency graph construction with topological build ordering and cycle detection
-- A glob engine supporting `*`, `**`, and brace expansion (`{a,b}`)
-- Parallel, content-hash-cached compilation
-- `compile_commands.json` generation for editor/IDE tooling (clangd, VS Code, etc.)
-- Project scaffolding (`mokai create`) with interactive template, C++ standard, and git-init prompts
-- Verified against real third-world projects, including a full build of **fmt** with conditional compiler-version-gated warning flags, and **SFML 3**, including its transitive dependencies (FreeType, HarfBuzz, SheenBidi, miniaudio, and several X11 extension libraries)
+* TOML-based project manifests (`mokai.toml`) with targets, file groups, property groups, conditional sources/flags/defines, and hooks
+* Local path and git-based dependency resolution, recursive across nested projects
+* Automatic dependency graph construction with topological build ordering and cycle detection
+* A glob engine supporting `*`, ``, and brace expansion (`{a,b}`)
+* Parallel, content-hash-cached compilation
+* `compile_commands.json` generation for editor/IDE tooling (clangd, VS Code, etc.)
+* Project scaffolding (`mokai create`) with interactive template, C++ standard, and git-init prompts
+* Verified against real-world projects, including a full build of **fmt** with conditional compiler-version-gated warning flags, and **SFML 3**, including its transitive dependencies (FreeType, HarfBuzz, SheenBidi, miniaudio, and several X11 extension libraries)
 
 ## What's in progress
 
-- A central package registry, so common libraries can be added by name with no manual setup
-- Smart version resolution (`sdl >= 2.7`) against upstream git tags
-- A shared, machine-wide package cache to avoid duplicate clones across projects
-- Visual Studio "Open Folder" / solution-adjacent tooling
-- Expanded diagnostics (typo suggestions, richer source-span errors)
+* A central package registry, so common libraries can be added by name with no manual setup
+* Smart version resolution (`sdl >= 2.7`) against upstream git tags
+* A shared, machine-wide package cache to avoid duplicate clones across projects
+* Visual Studio "Open Folder" / solution-adjacent tooling
+* Expanded diagnostics (typo suggestions, richer source-span errors)
+
+---
 
 ## Getting started
 
-Install Mokai, then:
+Install Mokai, then create a new project:
 
 ```bash
 mokai create myapp
+
 ```
 
-This drops you into an interactive scaffolder — pick a C++ standard, a starting template, and whether to initialize git, and Mokai builds the project for you on the spot:
+This starts an interactive scaffolder to pick a C++ standard, a starting template, and initialize git:
 
 ```
 ✨ Mokai Initializer – Create a new environment
@@ -91,23 +96,27 @@ This drops you into an interactive scaffolder — pick a C++ standard, a startin
   Navigate and trigger production builds via:
   cd myapp
   mokai Build
+
 ```
 
-(In a real terminal this is in color — gray timestamps, blue prefixes, cyan/green/yellow status — the plain text above doesn't do it justice.)
+### The Build Loop
 
-No `CMakeLists.txt` to hand-write, no `cmake_minimum_required`, no `add_executable` boilerplate, no separate `cmake -B build` configure step before you can even compile once. Compare the actual time-to-first-build: with CMake, getting a brand-new project from "I just had an idea" to "I have a running binary" usually means writing a `CMakeLists.txt` by hand or copying one from somewhere, running a configure step, picking a generator, and only then building — several manual steps before you've written a line of your own code. With Mokai, it's one command, four prompts, and you're compiling:
+Mokai eliminates the traditional boilerplate (`CMakeLists.txt`, `cmake_minimum_required`, etc.) and the distinct configuration step (`cmake -B build`). Instead of managing generators and multi-step setups before writing your first line of code, you can go from an empty directory to a running binary in one workflow:
 
 ```bash
 cd myapp
 mokai build
 ./build/debug/myapp
+
 ```
 
-That's the whole loop. No generator, no second tool reading Mokai's output — Mokai compiles and links directly.
+Mokai compiles and links directly. No configuration files are generated for a secondary build tool to read.
+
+---
 
 ## Project layout
 
-A minimal `mokai.toml` — this is a complete, real, buildable project, not a snippet:
+A minimal `mokai.toml` is a complete, real, buildable project, not just a snippet:
 
 ```toml
 [project]
@@ -117,9 +126,10 @@ cpp_version = "c++20"
 [target.myapp]
 type = "executable"
 sources = ["./main.cpp"]
+
 ```
 
-Five lines. No separate build directory to configure first, no generator to pick, nothing to learn beyond reading a TOML file top to bottom.
+It requires no separate build directory setup, no generator selection, and can be read top-to-bottom like regular data.
 
 ### Depending on another project
 
@@ -133,9 +143,10 @@ dependencies = ["../fmt"]
 type = "executable"
 sources = ["src/main.cpp"]
 depends_on = ["fmt"]
+
 ```
 
-This works against any dependency that exposes a matching target name or declares it in `[exports]` — for example, a real, tested build against [fmt](https://github.com/fmtlib/fmt):
+This works against any dependency that exposes a matching target name or declares it in `[exports]`. For example, here is a configuration tested against [fmt](https://github.com/fmtlib/fmt):
 
 ```toml
 # fmt's own mokai.toml (abbreviated)
@@ -151,13 +162,14 @@ include_dirs = ["include"]
 [exports]
 default_targets = ["fmt"]
 include_dirs = ["include"]
+
 ```
 
-`testfmt` never needs to know what `fmt` actually compiles, what flags it needs, or what it exports beyond its name — that complexity lives once, in `fmt`'s own manifest.
+`testfmt` does not need to manage `fmt`'s internal source files, specific compiler flags, or header paths—that configuration lives once within `fmt`'s own manifest.
 
 ### Depending on a specific target
 
-Some libraries build more than one thing. Depend on a specific one with `package:target`:
+Some libraries build multiple artifacts. You can depend on a specific target using the `package:target` syntax:
 
 ```toml
 [project]
@@ -169,16 +181,19 @@ dependencies = ["sfml@3.1.0"]
 type = "executable"
 sources = ["src/main.cpp"]
 depends_on = ["sfml:sfml-graphics"]
+
 ```
 
-This is how Mokai built a real, working [SFML 3](https://github.com/SFML/SFML) target with its full transitive dependency chain — FreeType, HarfBuzz, SheenBidi, miniaudio, and the relevant X11 extension libraries — all expressed in SFML's own `mokai.toml`. `mygame` stays five lines. The complexity is real, but it's contained exactly once, at the source, instead of being copy-pasted into every project that ever needs SFML.
+This approach allows Mokai to build complex dependency chains, such as [SFML 3](https://github.com/SFML/SFML) along with its transitive dependencies (FreeType, HarfBuzz, SheenBidi, miniaudio, and X11 libraries). The downstream project manifest remains clean, while the structural complexity is contained once at the source dependency level.
 
-Full configuration reference — file groups, property groups, conditional compilation, hooks, and exports — is being written now and will land in `docs/` shortly.
+*Full configuration reference documentation covering file groups, property groups, conditional compilation, hooks, and exports is currently in progress and will land in `docs/` shortly.*
+
+---
 
 ## Contributing
 
-Mokai is early and the design is still settling in places. Issues, ideas, and pull requests are welcome — especially real-world test cases (try building a library you use and open an issue with what broke).
+Mokai is in its early stages and the design is still evolving. Issues, feature ideas, and pull requests are welcome. Testing Mokai against libraries you currently use and opening an issue with what broke is highly appreciated.
 
 ## License
 
-MIT — see [`LICENSE`](./LICENSE).
+MIT — see [`LICENSE`](https://www.google.com/search?q=./LICENSE).
