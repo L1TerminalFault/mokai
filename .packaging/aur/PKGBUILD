@@ -12,7 +12,7 @@ source=(
   "$pkgname-$pkgver.tar.gz::https://github.com/L1TerminalFault/mokai/archive/refs/tags/v$pkgver.tar.gz"
 )
 
-sha256sums=('SKIP')
+sha256sums=('25172cd9de42358054920c5fc5b1076358bed3473ce37732f029b66d6435dfa3')
 
 build() {
   cmake -B build \
