@@ -1,0 +1,28 @@
+pkgname=mokai
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A fast, minimal build system, package manager, and developer toolkit for C++"
+arch=('x86_64')
+url="https://github.com/L1TerminalFault/mokai"
+license=('MIT')
+
+makedepends=('cmake')
+
+source=(
+  "$pkgname-$pkgver.tar.gz::https://github.com/L1TerminalFault/mokai/archive/refs/tags/v$pkgver.tar.gz"
+)
+
+sha256sums=('SKIP')
+
+build() {
+  cmake -B build \
+        -S . \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

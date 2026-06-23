@@ -19,9 +19,16 @@ add_library(MOKAI STATIC ${SOURCES} ${HEADERS})
 target_include_directories(MOKAI PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 target_compile_definitions(MOKAI PRIVATE
-    MOKAI_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/templates"
+    MOKAI_TEMPLATE_DIR="/usr/share/mokai/templates"
 )
 
 # 5. Define the runner binary executable
-add_executable(mokai src/entery.cpp)
+add_executable(mokai src/entry.cpp)
 target_link_libraries(mokai PRIVATE MOKAI)
+
+install(TARGETS mokai DESTINATION bin)
+
+install(
+    DIRECTORY src/templates
+    DESTINATION share/mokai
+)
