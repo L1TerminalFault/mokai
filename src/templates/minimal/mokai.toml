@@ -1,0 +1,7 @@
+[project]
+name = "{{PROJECT_NAME}}"
+cpp_version = "{{CPP_VERSION}}"
+
+[target.{{PROJECT_NAME}}]
+type = "executable"
+sources = ["src/main.cpp"]
