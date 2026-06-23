@@ -20,7 +20,7 @@ mokai build
 
 That's a complete, working project.
 
-> **Status: early alpha.** Mokai is under active development. The core build pipeline (config parsing, dependency resolution, dependency graph construction, caching, parallel builds) is implemented and has been tested against real-world libraries, including [fmt](https://github.com/fmtlib/fmt) and [SFML](https://github.com/SFML/SFML). The package registry and versioning system described below are designed and in progress. Expect rough edges, breaking changes, and missing features.
+> **Status: early alpha.** Mokai is under active development. The core build pipeline (config parsing, dependency resolution, dependency graph construction, caching, parallel builds) is implemented and has been tested against real-world libraries, including [fmt](https://github.com/fmtlib/fmt) and [SFML](https://github.com/SFML/SFML). The package registry and versioning system are designed and in progress, and the full configuration reference docs are being written now. Expect rough edges, breaking changes, and missing features.
 
 ---
 
@@ -57,18 +57,57 @@ Mokai's approach:
 
 ## Getting started
 
+Install Mokai, then:
+
 ```bash
 mokai create myapp
+```
+
+This drops you into an interactive scaffolder — pick a C++ standard, a starting template, and whether to initialize git, and Mokai builds the project for you on the spot:
+
+```
+✨ Mokai Initializer – Create a new environment
+──────────────────────────────────────────────────
+❯ Project name (my_mokai_project) myapp
+● Select C++ Language Specification Target:
+    ○ c++11
+    ○ c++14
+    ○ c++17
+    ○ c++20
+  ❯ ⦿ c++23
+  (Use ↑/↓ or j/k to navigate. Enter to select | item 5/6)
+
+● Select Project Skeleton Blueprint:
+  ❯ ⦿ minimal
+  (Use ↑/↓ or j/k to navigate. Enter to select)
+
+● Initialize empty local Git version control tree?
+  ❯ ⦿ Yes
+    ○ No
+  (Use ↑/↓ or j/k to navigate. Enter to select)
+
+✔ Project setup initialized perfectly!
+  Location: /home/k/algos/myapp
+  Navigate and trigger production builds via:
+  cd myapp
+  mokai Build
+```
+
+(In a real terminal this is in color — gray timestamps, blue prefixes, cyan/green/yellow status — the plain text above doesn't do it justice.)
+
+No `CMakeLists.txt` to hand-write, no `cmake_minimum_required`, no `add_executable` boilerplate, no separate `cmake -B build` configure step before you can even compile once. Compare the actual time-to-first-build: with CMake, getting a brand-new project from "I just had an idea" to "I have a running binary" usually means writing a `CMakeLists.txt` by hand or copying one from somewhere, running a configure step, picking a generator, and only then building — several manual steps before you've written a line of your own code. With Mokai, it's one command, four prompts, and you're compiling:
+
+```bash
 cd myapp
 mokai build
 ./build/debug/myapp
 ```
 
-`mokai create` will ask for a C++ standard, a starting template, and whether to initialize git — then scaffold a working project.
+That's the whole loop. No generator, no second tool reading Mokai's output — Mokai compiles and links directly.
 
 ## Project layout
 
-A minimal `mokai.toml`:
+A minimal `mokai.toml` — this is a complete, real, buildable project, not a snippet:
 
 ```toml
 [project]
@@ -80,7 +119,9 @@ type = "executable"
 sources = ["./main.cpp"]
 ```
 
-A project with a local dependency:
+Five lines. No separate build directory to configure first, no generator to pick, nothing to learn beyond reading a TOML file top to bottom.
+
+### Depending on another project
 
 ```toml
 [project]
@@ -112,7 +153,11 @@ default_targets = ["fmt"]
 include_dirs = ["include"]
 ```
 
-For dependencies with multiple targets, depend on a specific one with `package:target`:
+`testfmt` never needs to know what `fmt` actually compiles, what flags it needs, or what it exports beyond its name — that complexity lives once, in `fmt`'s own manifest.
+
+### Depending on a specific target
+
+Some libraries build more than one thing. Depend on a specific one with `package:target`:
 
 ```toml
 [project]
@@ -126,9 +171,9 @@ sources = ["src/main.cpp"]
 depends_on = ["sfml:sfml-graphics"]
 ```
 
-This is how Mokai built a real, working [SFML 3](https://github.com/SFML/SFML) target with its full transitive dependency chain — FreeType, HarfBuzz, SheenBidi, miniaudio, and the relevant X11 extension libraries — all expressed in SFML's own `mokai.toml`, invisible to the consuming project above.
+This is how Mokai built a real, working [SFML 3](https://github.com/SFML/SFML) target with its full transitive dependency chain — FreeType, HarfBuzz, SheenBidi, miniaudio, and the relevant X11 extension libraries — all expressed in SFML's own `mokai.toml`. `mygame` stays five lines. The complexity is real, but it's contained exactly once, at the source, instead of being copy-pasted into every project that ever needs SFML.
 
-See [`docs/`](./docs) for the full configuration reference, including file groups, property groups, conditional compilation, hooks, and exports.
+Full configuration reference — file groups, property groups, conditional compilation, hooks, and exports — is being written now and will land in `docs/` shortly.
 
 ## Contributing
 
@@ -136,4 +181,4 @@ Mokai is early and the design is still settling in places. Issues, ideas, and pu
 
 ## License
 
-[Add your chosen license here]
+MIT — see [`LICENSE`](./LICENSE).
