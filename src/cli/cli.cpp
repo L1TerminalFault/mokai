@@ -591,7 +591,18 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   std::println("{}──────────────────────────────────────────────────\n{}",
                Style::Dim, Style::Reset);
 
-  std::string project_name = promptText("Project name", "my_mokai_project");
+  std::string project_name;
+
+  // FIXED: If argument is passed explicitly (e.g., mokai create myapp), use it
+  // and fake input render
+  if (!args.empty() && !args[0].empty()) {
+    project_name = args[0];
+    std::println("{}{}{} {}› {}{}", Style::Green, Style::Success,
+                 "Project name", Style::Dim, Style::Reset, project_name);
+  } else {
+    project_name = promptText("Project name", "my_mokai_project");
+  }
+
   fs::path target_dir = fs::current_path() / project_name;
 
   if (fs::exists(target_dir)) {
@@ -663,13 +674,16 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
 
   if (init_git) {
     std::unordered_map<std::string, std::string> clean_env;
-    OS::ExecuteCommand("git init " + target_dir.string(), clean_env);
+    // FIXED: Forced tracking parameters to initialize silently on standard
+    // primary trunk naming convention
+    OS::ExecuteCommand("git init --initial-branch=main " + target_dir.string(),
+                       clean_env);
   }
 
   std::println("\r{}{}Project setup initialized perfectly!{}", Style::Green,
                Style::Success, Style::Reset);
   std::println("");
-  std::println("  {}Location: {} {}", Style::Dim, Style::Reset,
+  std::println("  {}Location:  {} {}", Style::Dim, Style::Reset,
                target_dir.string());
   std::println("  Navigate and trigger production builds via:");
   std::println("  {}cd {}{}", Style::Cyan, project_name, Style::Reset);
