@@ -4,12 +4,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -17,9 +19,73 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+#endif
+
 namespace fs = std::filesystem;
 
 namespace mokai {
+
+// ============================================================================
+// High-Performance Native Process Spawner (Vector-based)
+// ============================================================================
+static int executeCommandFast(const std::vector<std::string> &args) {
+  if (args.empty())
+    return -1;
+
+#if defined(_WIN32) || defined(_WIN64)
+  std::string command;
+  for (size_t i = 0; i < args.size(); ++i) {
+    command += args[i];
+    if (i + 1 < args.size())
+      command += " ";
+  }
+
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  ZeroMemory(&pi, sizeof(pi));
+
+  std::vector<char> cmd_buffer(command.begin(), command.end());
+  cmd_buffer.push_back('\0');
+
+  if (CreateProcessA(NULL, cmd_buffer.data(), NULL, NULL, FALSE, 0, NULL, NULL,
+                     &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return static_cast<int>(exitCode);
+  }
+  return -1;
+#else
+  std::vector<char *> c_args;
+  c_args.reserve(args.size() + 1);
+  for (const auto &arg : args) {
+    // const_cast is safe here because posix_spawnp does not modify the
+    // arguments
+    c_args.push_back(const_cast<char *>(arg.c_str()));
+  }
+  c_args.push_back(nullptr);
+
+  pid_t pid;
+  int status;
+  if (posix_spawnp(&pid, c_args[0], NULL, NULL, c_args.data(), environ) == 0) {
+    if (waitpid(pid, &status, 0) != -1) {
+      if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    }
+  }
+  return -1;
+#endif
+}
 
 struct Toolchain {
   std::string cpp_compiler;
@@ -92,27 +158,6 @@ static std::string targetTypeToString(TargetType type) {
   default:
     return "unknown";
   }
-}
-
-static std::string calculateFileHash(const std::string &path) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open())
-    return "0";
-
-  uint64_t hash = 14695981039346656037ULL;
-  char buffer[4096];
-
-  while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-    std::streamsize bytes_read = file.gcount();
-    for (std::streamsize i = 0; i < bytes_read; ++i) {
-      hash ^= static_cast<uint8_t>(buffer[i]);
-      hash *= 1099511628211ULL;
-    }
-  }
-
-  std::stringstream ss;
-  ss << std::hex << hash;
-  return ss.str();
 }
 
 const QualifiedTarget *
@@ -216,9 +261,8 @@ FindSiblingByName(const std::vector<QualifiedTarget> &all,
 static bool SplitExplicitTarget(const std::string &raw, std::string &pkg,
                                 std::string &target) {
   auto colon = raw.find(':');
-  if (colon == std::string::npos) {
+  if (colon == std::string::npos)
     return false;
-  }
   pkg = raw.substr(0, colon);
   target = raw.substr(colon + 1);
   return true;
@@ -227,9 +271,8 @@ static bool SplitExplicitTarget(const std::string &raw, std::string &pkg,
 static bool SplitProfile(const std::string &raw, std::string &pkg,
                          std::string &profile) {
   auto slash = raw.find('/');
-  if (slash == std::string::npos) {
+  if (slash == std::string::npos)
     return false;
-  }
   pkg = raw.substr(0, slash);
   profile = raw.substr(slash + 1);
   return true;
@@ -308,9 +351,8 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
       }
     }
   }
-  if (!resolved.empty()) {
+  if (!resolved.empty())
     return resolved;
-  }
 
   auto dep_manifest = FindResolvedDependency(
       from_target.manifest->resolved_dependencies, raw_dep);
@@ -379,9 +421,8 @@ Graph::computeBuildOrder(const std::vector<GraphEdge> &edges) {
 
     if (adj.count(node)) {
       for (const auto &dependency : adj[node]) {
-        if (!states.count(dependency)) {
+        if (!states.count(dependency))
           continue;
-        }
 
         if (states[dependency] == NodeState::Visiting) {
           std::stringstream error_trace;
@@ -391,9 +432,8 @@ Graph::computeBuildOrder(const std::vector<GraphEdge> &edges) {
 
           bool track_active_loop = false;
           for (const auto &path_node : active_path) {
-            if (path_node == dependency) {
+            if (path_node == dependency)
               track_active_loop = true;
-            }
             if (track_active_loop) {
               error_trace << "    " << path_node << " ->\n";
             }
@@ -405,9 +445,8 @@ Graph::computeBuildOrder(const std::vector<GraphEdge> &edges) {
         }
 
         if (states[dependency] == NodeState::Unvisited) {
-          if (!self(self, dependency)) {
+          if (!self(self, dependency))
             return false;
-          }
         }
       }
     }
@@ -420,9 +459,8 @@ Graph::computeBuildOrder(const std::vector<GraphEdge> &edges) {
 
   for (const auto &qt : m_allTargets) {
     if (states[qt.qualifiedName] == NodeState::Unvisited) {
-      if (!dfs(dfs, qt.qualifiedName)) {
+      if (!dfs(dfs, qt.qualifiedName))
         return {};
-      }
     }
   }
 
@@ -489,7 +527,7 @@ void Graph::matchGlobPattern(const std::string &pattern,
     } else if (c == '?') {
       regex_str += "[^/]";
     } else if (c == '.' || c == '+' || c == '^' || c == '$' || c == '(' ||
-               c == ')' || c == '[' || c == ']' || c == '|') {
+               c == ')' || c == '(' || c == ']' || c == '|') {
       regex_str += '\\';
       regex_str += c;
     } else {
@@ -703,10 +741,7 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
     }
   }
 
-  // FIXED CORE RE-DEFINITION BUG: Initialized here, used globally down to
-  // telemetry summary.
   auto build_start_time = std::chrono::high_resolution_clock::now();
-
   Toolchain toolchain = discoverToolchain();
   std::string output_root = "./build";
 
@@ -728,6 +763,7 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
 
   std::unordered_map<std::string, std::pair<std::string, std::string>>
       state_cache;
+  std::mutex cache_mutex;
 
   if (fs::exists(cache_path) && !m_options.force_rebuild) {
     std::ifstream cache_file(cache_path);
@@ -740,8 +776,6 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
     }
   }
 
-  int total_steps = static_cast<int>(build_order.size());
-  int current_step = 0;
   std::unordered_map<std::string, std::string> built_library_map;
   std::vector<std::string> compile_commands_entries;
   std::mutex compilation_db_mutex;
@@ -750,407 +784,566 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
     executeHooks(m_allTargets.front().manifest, HookTrigger::PreBuild, "");
   }
 
-  for (const auto &qualified_name : build_order) {
-    current_step++;
+  std::unordered_map<std::string, std::vector<std::string>> dependents_graph;
+  std::unordered_map<std::string, int> in_degree;
+  std::unordered_set<std::string> pipeline_targets(build_order.begin(),
+                                                   build_order.end());
 
+  for (const auto &qualified_name : build_order) {
+    in_degree[qualified_name] = 0;
+  }
+
+  for (const auto &qualified_name : build_order) {
     const QualifiedTarget *qt = FindByQualifiedName(qualified_name);
     if (!qt)
-      return false;
+      continue;
 
-    const Target &target = qt->target;
+    for (const auto &raw_dep : qt->target.depends_on) {
+      auto resolved = resolveDependsOnEntry(raw_dep, *qt);
+      for (const auto &dep_name : resolved) {
+        if (pipeline_targets.contains(dep_name)) {
+          dependents_graph[dep_name].push_back(qualified_name);
+          in_degree[qualified_name]++;
+        }
+      }
+    }
+  }
 
+  std::queue<std::string> ready_targets;
+  int completed_targets_count = 0;
+  int total_pipeline_targets = 0;
+  std::atomic<bool> global_build_failed{false};
+
+  std::atomic<int> completed_compilation_units{0};
+  int processed_compilation_units = 0;
+
+  for (const auto &qualified_name : build_order) {
+    const QualifiedTarget *qt = FindByQualifiedName(qualified_name);
+    if (!qt)
+      continue;
     if (!m_options.target_filter.empty() &&
-        target.name != m_options.target_filter) {
-      if (m_options.verbosity == Verbosity::Verbose) {
-        m_logger.Debug("Filtering out target module execution tree step: " +
-                       qualified_name);
-      }
+        qt->target.name != m_options.target_filter) {
       continue;
     }
-
-    std::vector<std::string> sources =
-        resolveTargetSources(target, qt->manifest);
-    if (sources.empty()) {
-      if (m_options.verbosity != Verbosity::Quiet) {
-        m_logger.Warn("Skipping build unit '" + qualified_name +
-                      "': Active source list evaluates to empty via current "
-                      "option configuration.");
-      }
-      continue;
+    total_pipeline_targets++;
+    if (in_degree[qualified_name] == 0) {
+      ready_targets.push(qualified_name);
     }
+  }
 
-    total_source_files += sources.size();
+  std::condition_variable scheduler_cv;
+  std::mutex scheduler_mutex;
 
-    bool file_changed_detected = false;
-    for (const auto &hook : qt->manifest->hooks) {
-      if (hook.trigger != HookTrigger::FileChange || !hook.pattern.has_value())
-        continue;
+  unsigned int worker_count =
+      (m_options.job_count > 0)
+          ? static_cast<unsigned int>(m_options.job_count)
+          : std::max(1u, std::thread::hardware_concurrency());
 
-      std::vector<std::string> hook_matches;
-      std::string base =
-          qt->manifest->base_dir.empty() ? "." : qt->manifest->base_dir;
+  struct FileTask {
+    std::string src;
+    std::vector<std::string>
+        compile_args; // OPTIMIZATION: Structured arg vector!
+    std::string obj_file;
+    std::string working_directory;
+    size_t task_idx;
+  };
 
-      if (hook.pattern.value().rfind("@", 0) == 0) {
-        std::string group_target = hook.pattern.value().substr(1);
-        for (const auto &fg : qt->manifest->file_groups) {
-          if (fg.name == group_target) {
-            for (const auto &pattern : fg.patterns)
-              matchGlobPattern(pattern, base, hook_matches);
-          }
-        }
-      } else {
-        matchGlobPattern(hook.pattern.value(), base, hook_matches);
-      }
+  struct CacheRecord {
+    std::string src;
+    std::string write_time;
+    std::string hash;
+  };
 
-      for (const auto &file : hook_matches) {
-        if (!fs::exists(file))
-          continue;
-        std::string current_time = std::to_string(
-            fs::last_write_time(file).time_since_epoch().count());
+  struct ActiveTargetContext {
+    const QualifiedTarget *qt;
+    std::vector<std::string> sources;
+    std::vector<std::string> object_files;
+    std::atomic<size_t> remaining_files{0};
+    std::atomic<bool> failed{false};
+    std::atomic<bool> requires_linkage{false};
+    int step_index;
 
-        if (m_options.force_rebuild || !state_cache.count(file) ||
-            state_cache[file].first != current_time) {
-          std::string current_hash = calculateFileHash(file);
-          if (m_options.force_rebuild || !state_cache.count(file) ||
-              state_cache[file].second != current_hash) {
-            file_changed_detected = true;
-            state_cache[file] = {current_time, current_hash};
-          } else {
-            state_cache[file].first = current_time;
-          }
-        }
-      }
+    std::vector<CacheRecord> computed_cache_records;
+    std::mutex cache_records_mutex;
+  };
 
-      if (file_changed_detected) {
-        executeHooks(qt->manifest, HookTrigger::FileChange, target.name);
-      }
-    }
+  std::queue<std::pair<std::shared_ptr<ActiveTargetContext>, FileTask>>
+      global_task_queue;
+  std::mutex queue_mutex;
+  std::condition_variable queue_cv;
+  std::atomic<bool> workers_should_terminate{false};
 
-    executeHooks(qt->manifest, HookTrigger::PreTargetBuild, target.name);
+  std::atomic<int> current_global_step{0};
 
-    if (m_options.verbosity != Verbosity::Quiet) {
-      m_logger.Step(current_step, total_steps,
-                    "Compiling unit: " + qualified_name + " [" + target.name +
-                        "]");
-    }
+  std::vector<std::thread> workers;
+  for (unsigned int i = 0; i < worker_count; ++i) {
+    workers.emplace_back([&]() {
+      while (true) {
+        std::pair<std::shared_ptr<ActiveTargetContext>, FileTask> work_item;
+        {
+          std::unique_lock<std::mutex> lock(queue_mutex);
+          queue_cv.wait(lock, [&]() {
+            return !global_task_queue.empty() || workers_should_terminate ||
+                   global_build_failed;
+          });
 
-    std::stringstream flags_stream;
-    if (!toolchain.is_msvc) {
-      flags_stream << "-fPIC ";
-      if (m_options.profile == BuildProfile::Release) {
-        flags_stream << "-O3 -DNDEBUG ";
-      } else {
-        flags_stream << "-g -O0 ";
-      }
-      if (m_options.verbosity == Verbosity::Verbose) {
-        flags_stream << "-v ";
-      }
-    } else {
-      if (m_options.profile == BuildProfile::Release) {
-        flags_stream << "/O2 /DNDEBUG /EHsc ";
-      } else {
-        flags_stream << "/Zi /Od /EHsc ";
-      }
-    }
-
-    auto eval_cb = [this, &target, &qt](const std::string &cond) {
-      return this->evaluateConditionExpression(cond, target, qt->manifest);
-    };
-
-    std::vector<std::string> active_flags = target.getActiveFlags(eval_cb);
-    for (const auto &flag : active_flags) {
-      flags_stream << flag << " ";
-    }
-
-    std::string base =
-        qt->manifest->base_dir.empty() ? "." : qt->manifest->base_dir;
-
-    char inc_prefix = toolchain.is_msvc ? '/' : '-';
-    for (const auto &inc : target.include_dirs) {
-      fs::path inc_path(inc);
-      if (inc_path.is_relative())
-        inc_path = fs::path(base) / inc_path;
-      flags_stream << inc_prefix << "I" << inc_path.lexically_normal().string()
-                   << " ";
-    }
-    for (const auto &inc : qt->manifest->project.include_dirs) {
-      fs::path inc_path(inc);
-      if (inc_path.is_relative())
-        inc_path = fs::path(base) / inc_path;
-      flags_stream << inc_prefix << "I" << inc_path.lexically_normal().string()
-                   << " ";
-    }
-
-    auto transitive_deps = getTransitiveDependencies(qualified_name);
-    std::reverse(transitive_deps.begin(), transitive_deps.end());
-
-    std::unordered_set<std::string> seen_includes;
-    for (const auto &dep_name : transitive_deps) {
-      if (const QualifiedTarget *dep_qt = FindByQualifiedName(dep_name)) {
-        if (dep_qt->manifest && dep_qt->manifest->exports) {
-          std::string dep_base = dep_qt->manifest->base_dir.empty()
-                                     ? "."
-                                     : dep_qt->manifest->base_dir;
-
-          for (const auto &export_inc :
-               dep_qt->manifest->exports->include_dirs) {
-            fs::path dep_inc_path(export_inc);
-            if (dep_inc_path.is_relative()) {
-              dep_inc_path = fs::path(dep_base) / dep_inc_path;
-            }
-            std::string norm_inc = dep_inc_path.lexically_normal().string();
-
-            if (!seen_includes.contains(norm_inc)) {
-              seen_includes.insert(norm_inc);
-              flags_stream << inc_prefix << "I" << norm_inc << " ";
-            }
-          }
-        }
-      }
-    }
-
-    std::vector<std::string> active_props = target.getActiveProperties(eval_cb);
-    for (const auto &prop_ref : active_props) {
-      if (prop_ref.rfind("@", 0) == 0) {
-        std::string target_prop = prop_ref.substr(1);
-        for (const auto &pg : qt->manifest->property_groups) {
-          if (pg.name == target_prop) {
-            bool group_allowed = true;
-            if (pg.condition.has_value()) {
-              group_allowed = this->evaluateConditionExpression(
-                  pg.condition.value(), target, qt->manifest);
-            }
-            if (group_allowed) {
-              for (const auto &def : pg.defines)
-                flags_stream << (toolchain.is_msvc ? "/D" : "-D") << def << " ";
-            }
-          }
-        }
-      } else {
-        flags_stream << (toolchain.is_msvc ? "/D" : "-D") << prop_ref << " ";
-      }
-    }
-
-    std::string shared_user_flags = flags_stream.str();
-    std::vector<std::string> object_files(sources.size());
-    std::atomic<size_t> next_source_idx(0);
-    std::atomic<bool> compilation_failed(false);
-    std::atomic<bool> target_requires_linkage(false);
-
-    unsigned int worker_count =
-        (m_options.job_count > 0)
-            ? static_cast<unsigned int>(m_options.job_count)
-            : std::max(1u, std::thread::hardware_concurrency());
-
-    std::vector<std::thread> workers;
-    std::string working_directory = fs::current_path().string();
-    std::string raw_manifest_std = qt->manifest->project.cpp_version;
-
-    for (unsigned int i = 0; i < worker_count; ++i) {
-      workers.emplace_back([&]() {
-        while (true) {
-          size_t idx = next_source_idx++;
-          if (idx >= sources.size() || compilation_failed)
+          if (workers_should_terminate || global_build_failed)
             break;
 
-          const auto &src = sources[idx];
-          fs::path src_path(src);
-          std::string ext = src_path.extension().string();
+          work_item = std::move(global_task_queue.front());
+          global_task_queue.pop();
+        }
 
-          std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-          bool is_c_file = (ext == ".c");
+        auto &ctx = work_item.first;
+        const auto &task = work_item.second;
 
-          std::string chosen_compiler =
-              is_c_file ? toolchain.c_compiler : toolchain.cpp_compiler;
-          std::string final_std_flag;
-
-          if (toolchain.is_msvc) {
-            final_std_flag = is_c_file ? "/std:c11" : "/std:c++20";
-          } else {
-            if (is_c_file) {
-              final_std_flag = (raw_manifest_std.empty() ||
-                                raw_manifest_std.rfind("c++", 0) == 0)
-                                   ? "-std=c11"
-                                   : "-std=" + raw_manifest_std;
-            } else {
-              final_std_flag = (raw_manifest_std.empty() ||
-                                raw_manifest_std.rfind("c++", 0) != 0)
-                                   ? "-std=c++23"
-                                   : "-std=" + raw_manifest_std;
-            }
+        if (global_build_failed || ctx->failed) {
+          if (ctx->remaining_files.fetch_sub(1) == 1) {
+            completed_compilation_units.fetch_add(1);
+            std::unique_lock<std::mutex> sched_lock(scheduler_mutex);
+            scheduler_cv.notify_one();
           }
+          continue;
+        }
 
-          std::string object_filename = src_path.filename().string() +
-                                        (toolchain.is_msvc ? ".obj" : ".o");
-          fs::path out_obj_path =
-              fs::path(object_cache_dir) / target.name / object_filename;
-          fs::create_directories(out_obj_path.parent_path());
+        // OPTIMIZATION: Check cache completely off the main thread inside the
+        // worker!
+        bool need_compile = true;
+        std::string current_time;
+        try {
+          fs::path src_path(task.src);
+          if (fs::exists(src_path)) {
+            current_time = std::to_string(
+                fs::last_write_time(src_path).time_since_epoch().count());
 
-          std::string obj_file = out_obj_path.string();
-          object_files[idx] = obj_file;
-
-          std::string current_time = std::to_string(
-              fs::last_write_time(src_path).time_since_epoch().count());
-          bool need_compile = true;
-
-          if (!m_options.force_rebuild && state_cache.count(src)) {
-            if (state_cache[src].first == current_time &&
-                fs::exists(obj_file)) {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            if (!m_options.force_rebuild && state_cache.count(task.src) &&
+                state_cache[task.src].first == current_time &&
+                fs::exists(task.obj_file)) {
               need_compile = false;
               total_cache_hits++;
             }
           }
+        } catch (...) {
+        }
 
-          if (need_compile) {
-            total_cache_misses++;
-            target_requires_linkage = true;
+        if (need_compile) {
+          total_cache_misses++;
+          ctx->requires_linkage = true;
 
-            std::string command;
-            if (toolchain.is_msvc) {
-              command = chosen_compiler + " " + final_std_flag + " " +
-                        shared_user_flags + " /c " + src + " /Fo" + obj_file;
-            } else {
-              command = chosen_compiler + " " + final_std_flag + " " +
-                        shared_user_flags + " -c " + src + " -o " + obj_file;
-            }
+          // OPTIMIZATION: Format JSON string BEFORE locking mutex to prevent
+          // thread contention
+          std::string full_command_str;
+          for (size_t a = 0; a < task.compile_args.size(); ++a) {
+            full_command_str += task.compile_args[a];
+            if (a + 1 < task.compile_args.size())
+              full_command_str += " ";
+          }
 
-            {
-              std::lock_guard<std::mutex> lock(compilation_db_mutex);
-              std::stringstream json_entry;
-              json_entry << "  {\n"
-                         << "    \"directory\": \""
-                         << escapeJsonString(working_directory) << "\",\n"
-                         << "    \"command\": \"" << escapeJsonString(command)
-                         << "\",\n"
-                         << "    \"file\": \"" << escapeJsonString(src)
-                         << "\",\n"
-                         << "    \"output\": \"" << escapeJsonString(obj_file)
-                         << "\"\n"
-                         << "  }";
-              compile_commands_entries.push_back(json_entry.str());
-            }
+          std::stringstream json_entry;
+          json_entry << "  {\n"
+                     << "    \"directory\": \""
+                     << escapeJsonString(task.working_directory) << "\",\n"
+                     << "    \"command\": \""
+                     << escapeJsonString(full_command_str) << "\",\n"
+                     << "    \"file\": \"" << escapeJsonString(task.src)
+                     << "\",\n"
+                     << "    \"output\": \"" << escapeJsonString(task.obj_file)
+                     << "\"\n"
+                     << "  }";
+          std::string json_str = json_entry.str();
 
-            int res = std::system(command.c_str());
-            if (res != 0) {
-              compilation_failed = true;
+          {
+            std::lock_guard<std::mutex> db_lock(compilation_db_mutex);
+            compile_commands_entries.push_back(std::move(json_str));
+          }
+
+          int res = executeCommandFast(task.compile_args);
+
+          if (res != 0) {
+            ctx->failed = true;
+            global_build_failed = true;
+          } else {
+            // Register cache hit success
+            if (!current_time.empty()) {
+              std::lock_guard<std::mutex> rec_lock(ctx->cache_records_mutex);
+              ctx->computed_cache_records.push_back(
+                  {task.src, current_time, "-"});
             }
           }
         }
-      });
-    }
 
-    for (auto &worker : workers) {
-      if (worker.joinable())
-        worker.join();
-    }
-
-    if (compilation_failed) {
-      m_logger.Error("Compilation graph pass failed for block: " +
-                     qualified_name);
-      return false;
-    }
-
-    std::string target_output_file;
-#if defined(_WIN32) || defined(_WIN64)
-    if (target.type == TargetType::Executable) {
-      target_output_file = target_build_dir + "/" + target.name + ".exe";
-    } else if (target.type == TargetType::StaticLibrary) {
-      target_output_file = target_build_dir + "/" + target.name + ".lib";
-    } else if (target.type == TargetType::SharedLibrary) {
-      target_output_file = target_build_dir + "/" + target.name + ".dll";
-    }
-#elif defined(__APPLE__)
-    if (target.type == TargetType::Executable) {
-      target_output_file = target_build_dir + "/" + target.name;
-    } else if (target.type == TargetType::StaticLibrary) {
-      target_output_file = target_build_dir + "/lib" + target.name + ".a";
-    } else if (target.type == TargetType::SharedLibrary) {
-      target_output_file = target_build_dir + "/lib" + target.name + ".dylib";
-    }
-#else
-    if (target.type == TargetType::Executable) {
-      target_output_file = target_build_dir + "/" + target.name;
-    } else if (target.type == TargetType::StaticLibrary) {
-      target_output_file = target_build_dir + "/lib" + target.name + ".a";
-    } else if (target.type == TargetType::SharedLibrary) {
-      target_output_file = target_build_dir + "/lib" + target.name + ".so";
-    }
-#endif
-
-    if (target_requires_linkage || !fs::exists(target_output_file)) {
-      std::string link_cmd;
-      if (target.type == TargetType::StaticLibrary) {
-        if (toolchain.is_msvc) {
-          link_cmd = toolchain.archiver + " /OUT:" + target_output_file;
-        } else {
-          link_cmd = toolchain.archiver + " rcs " + target_output_file;
+        if (ctx->remaining_files.fetch_sub(1) == 1) {
+          completed_compilation_units.fetch_add(1);
+          std::unique_lock<std::mutex> sched_lock(scheduler_mutex);
+          scheduler_cv.notify_one();
         }
-        for (const auto &obj : object_files) {
-          link_cmd += " " + obj;
+      }
+    });
+  }
+
+  std::vector<std::shared_ptr<ActiveTargetContext>> active_targets_running;
+  std::string working_directory = fs::current_path().string();
+
+  std::unique_lock<std::mutex> sched_lock(scheduler_mutex);
+  while ((completed_targets_count < total_pipeline_targets) &&
+         !global_build_failed) {
+
+    while (!ready_targets.empty()) {
+      std::string current_ready = ready_targets.front();
+      ready_targets.pop();
+
+      const QualifiedTarget *qt = FindByQualifiedName(current_ready);
+      const Target &target = qt->target;
+
+      std::vector<std::string> sources =
+          resolveTargetSources(target, qt->manifest);
+      if (sources.empty()) {
+        if (m_options.verbosity != Verbosity::Quiet) {
+          m_logger.Warn("Skipping build unit '" + current_ready +
+                        "': Source list evaluated to empty.");
+        }
+        completed_targets_count++;
+        for (const auto &dep : dependents_graph[current_ready]) {
+          in_degree[dep]--;
+          if (in_degree[dep] == 0 && pipeline_targets.contains(dep)) {
+            ready_targets.push(dep);
+          }
+        }
+        continue;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        total_source_files += sources.size();
+      }
+
+      executeHooks(qt->manifest, HookTrigger::PreTargetBuild, target.name);
+
+      int step_idx = ++current_global_step;
+      if (m_options.verbosity != Verbosity::Quiet) {
+        m_logger.Step(step_idx, total_pipeline_targets,
+                      "Compiling unit: " + current_ready + " [" + target.name +
+                          "]");
+      }
+
+      // Pre-build structured argument tokens instead of a giant string
+      std::vector<std::string> base_args;
+      if (!toolchain.is_msvc) {
+        base_args.push_back("-fPIC");
+        if (m_options.profile == BuildProfile::Release) {
+          base_args.push_back("-O3");
+          base_args.push_back("-DNDEBUG");
+        } else {
+          base_args.push_back("-g");
+          base_args.push_back("-O0");
         }
       } else {
-        if (toolchain.is_msvc) {
-          link_cmd = "link /OUT:" + target_output_file + " ";
-          if (target.type == TargetType::SharedLibrary) {
-            link_cmd += "/DLL ";
-          }
+        if (m_options.profile == BuildProfile::Release) {
+          base_args.push_back("/O2");
+          base_args.push_back("/DNDEBUG");
+          base_args.push_back("/EHsc");
         } else {
-          link_cmd = toolchain.cpp_compiler + " ";
-          if (target.type == TargetType::SharedLibrary) {
-            link_cmd += "-shared ";
-          }
-          if (m_options.verbosity == Verbosity::Verbose) {
-            link_cmd += "-v ";
-          }
+          base_args.push_back("/Zi");
+          base_args.push_back("/Od");
+          base_args.push_back("/EHsc");
         }
+      }
 
-        for (const auto &obj : object_files) {
-          link_cmd += " " + obj;
-        }
+      auto eval_cb = [this, &target, &qt](const std::string &cond) {
+        return this->evaluateConditionExpression(cond, target, qt->manifest);
+      };
 
-        if (toolchain.is_msvc) {
-          for (const auto &dep_name : transitive_deps) {
-            if (built_library_map.count(dep_name)) {
-              fs::path lib_path = built_library_map[dep_name];
-              link_cmd +=
-                  " " + lib_path.replace_extension(".lib").string() + " ";
+      std::vector<std::string> active_flags = target.getActiveFlags(eval_cb);
+      for (const auto &flag : active_flags)
+        base_args.push_back(flag);
+
+      std::string base =
+          qt->manifest->base_dir.empty() ? "." : qt->manifest->base_dir;
+      std::string inc_prefix = toolchain.is_msvc ? "/I" : "-I";
+
+      for (const auto &inc : target.include_dirs) {
+        fs::path inc_path(inc);
+        if (inc_path.is_relative())
+          inc_path = fs::path(base) / inc_path;
+        base_args.push_back(inc_prefix + inc_path.lexically_normal().string());
+      }
+      for (const auto &inc : qt->manifest->project.include_dirs) {
+        fs::path inc_path(inc);
+        if (inc_path.is_relative())
+          inc_path = fs::path(base) / inc_path;
+        base_args.push_back(inc_prefix + inc_path.lexically_normal().string());
+      }
+
+      auto transitive_deps = getTransitiveDependencies(current_ready);
+      std::reverse(transitive_deps.begin(), transitive_deps.end());
+
+      std::unordered_set<std::string> seen_includes;
+      for (const auto &dep_name : transitive_deps) {
+        if (const QualifiedTarget *dep_qt = FindByQualifiedName(dep_name)) {
+          if (dep_qt->manifest && dep_qt->manifest->exports) {
+            std::string dep_base = dep_qt->manifest->base_dir.empty()
+                                       ? "."
+                                       : dep_qt->manifest->base_dir;
+            for (const auto &export_inc :
+                 dep_qt->manifest->exports->include_dirs) {
+              fs::path dep_inc_path(export_inc);
+              if (dep_inc_path.is_relative())
+                dep_inc_path = fs::path(dep_base) / dep_inc_path;
+              std::string norm_inc = dep_inc_path.lexically_normal().string();
+              if (!seen_includes.contains(norm_inc)) {
+                seen_includes.insert(norm_inc);
+                base_args.push_back(inc_prefix + norm_inc);
+              }
             }
           }
-          for (const auto &sys_lib : target.system_libs) {
-            link_cmd += " " + sys_lib + ".lib ";
-          }
-        } else {
-          link_cmd += " -o " + target_output_file + " ";
-          for (const auto &dep_name : transitive_deps) {
-            if (built_library_map.count(dep_name)) {
-              link_cmd += " " + built_library_map[dep_name] + " ";
-            }
-          }
-          for (const auto &sys_lib : target.system_libs) {
-            link_cmd += " -l" + sys_lib + " ";
-          }
         }
       }
 
-      int link_res = std::system(link_cmd.c_str());
-      if (link_res != 0) {
-        m_logger.Error("Linkage stage failed for block target: " +
-                       target_output_file);
-        return false;
+      std::vector<std::string> active_props =
+          target.getActiveProperties(eval_cb);
+      std::string def_prefix = toolchain.is_msvc ? "/D" : "-D";
+      for (const auto &prop_ref : active_props) {
+        if (prop_ref.rfind("@", 0) == 0) {
+          std::string target_prop = prop_ref.substr(1);
+          for (const auto &pg : qt->manifest->property_groups) {
+            if (pg.name == target_prop) {
+              if (!pg.condition.has_value() ||
+                  this->evaluateConditionExpression(pg.condition.value(),
+                                                    target, qt->manifest)) {
+                for (const auto &def : pg.defines)
+                  base_args.push_back(def_prefix + def);
+              }
+            }
+          }
+        } else {
+          base_args.push_back(def_prefix + prop_ref);
+        }
       }
+
+      auto ctx = std::make_shared<ActiveTargetContext>(
+          qt, sources, std::vector<std::string>(sources.size()), 0, false,
+          false, step_idx);
+
+      fs::path target_obj_dir = fs::path(object_cache_dir) / target.name;
+      fs::create_directories(target_obj_dir);
+
+      std::vector<FileTask> localized_tasks;
+      for (size_t idx = 0; idx < sources.size(); ++idx) {
+        const auto &src = sources[idx];
+        fs::path src_path(src);
+        std::string ext = src_path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        bool is_c_file = (ext == ".c");
+
+        std::string chosen_compiler =
+            is_c_file ? toolchain.c_compiler : toolchain.cpp_compiler;
+        std::string final_std_flag =
+            toolchain.is_msvc ? (is_c_file ? "/std:c11" : "/std:c++20")
+                              : (is_c_file ? "-std=c11" : "-std=c++23");
+
+        std::string object_filename =
+            src_path.filename().string() + (toolchain.is_msvc ? ".obj" : ".o");
+
+        fs::path out_obj_path = target_obj_dir / object_filename;
+        std::string obj_file = out_obj_path.string();
+        ctx->object_files[idx] = obj_file;
+
+        // Build the specific argument vector for this individual file
+        std::vector<std::string> file_args;
+        file_args.push_back(chosen_compiler);
+        file_args.push_back(final_std_flag);
+        for (const auto &a : base_args)
+          file_args.push_back(a);
+
+        if (toolchain.is_msvc) {
+          file_args.push_back("/c");
+          file_args.push_back(src);
+          file_args.push_back("/Fo" + obj_file);
+        } else {
+          file_args.push_back("-c");
+          file_args.push_back(src);
+          file_args.push_back("-o");
+          file_args.push_back(obj_file);
+        }
+
+        // Blindly push to queue without doing I/O cache checks here! Worker
+        // handles it.
+        localized_tasks.push_back(
+            {src, std::move(file_args), obj_file, working_directory, idx});
+      }
+
+      if (localized_tasks.empty()) {
+        ctx->remaining_files = 0;
+        completed_compilation_units.fetch_add(1);
+        scheduler_cv.notify_one();
+      } else {
+        ctx->remaining_files = localized_tasks.size();
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex);
+          for (auto &task : localized_tasks) {
+            global_task_queue.push({ctx, std::move(task)});
+          }
+        }
+        queue_cv.notify_all();
+      }
+      active_targets_running.push_back(ctx);
     }
 
-    built_library_map[qualified_name] = target_output_file;
+    scheduler_cv.wait(sched_lock, [&]() {
+      return global_build_failed ||
+             (completed_compilation_units.load() > processed_compilation_units);
+    });
 
-    for (const auto &src : sources) {
-      if (fs::exists(src)) {
-        std::string write_time =
-            std::to_string(fs::last_write_time(src).time_since_epoch().count());
-        state_cache[src] = {write_time, calculateFileHash(src)};
+    if (global_build_failed)
+      break;
+
+    while (completed_compilation_units.load() > processed_compilation_units) {
+      processed_compilation_units++;
+
+      for (auto it = active_targets_running.begin();
+           it != active_targets_running.end();) {
+        auto ctx = *it;
+        if (ctx->remaining_files == 0) {
+          if (ctx->failed) {
+            global_build_failed = true;
+            break;
+          }
+
+          const Target &target = ctx->qt->target;
+          std::string qualified_name = ctx->qt->qualifiedName;
+
+          std::string target_output_file;
+#if defined(_WIN32) || defined(_WIN64)
+          if (target.type == TargetType::Executable)
+            target_output_file = target_build_dir + "/" + target.name + ".exe";
+          else if (target.type == TargetType::StaticLibrary)
+            target_output_file = target_build_dir + "/" + target.name + ".lib";
+          else if (target.type == TargetType::SharedLibrary)
+            target_output_file = target_build_dir + "/" + target.name + ".dll";
+#elif defined(__APPLE__)
+          if (target.type == TargetType::Executable)
+            target_output_file = target_build_dir + "/" + target.name;
+          else if (target.type == TargetType::StaticLibrary)
+            target_output_file = target_build_dir + "/lib" + target.name + ".a";
+          else if (target.type == TargetType::SharedLibrary)
+            target_output_file =
+                target_build_dir + "/lib" + target.name + ".dylib";
+#else
+          if (target.type == TargetType::Executable)
+            target_output_file = target_build_dir + "/" + target.name;
+          else if (target.type == TargetType::StaticLibrary)
+            target_output_file = target_build_dir + "/lib" + target.name + ".a";
+          else if (target.type == TargetType::SharedLibrary)
+            target_output_file =
+                target_build_dir + "/lib" + target.name + ".so";
+#endif
+
+          if (ctx->requires_linkage || !fs::exists(target_output_file)) {
+            std::string link_cmd;
+            auto transitive_deps = getTransitiveDependencies(qualified_name);
+            std::reverse(transitive_deps.begin(), transitive_deps.end());
+
+            if (target.type == TargetType::StaticLibrary) {
+              link_cmd =
+                  toolchain.is_msvc
+                      ? (toolchain.archiver + " /OUT:" + target_output_file)
+                      : (toolchain.archiver + " rcs " + target_output_file);
+              for (const auto &obj : ctx->object_files)
+                link_cmd += " " + obj;
+            } else {
+              if (toolchain.is_msvc) {
+                link_cmd = "link /OUT:" + target_output_file + " ";
+                if (target.type == TargetType::SharedLibrary)
+                  link_cmd += "/DLL ";
+              } else {
+                link_cmd =
+                    toolchain.cpp_compiler + " " +
+                    (target.type == TargetType::SharedLibrary ? "-shared "
+                                                              : "");
+                if (m_options.verbosity == Verbosity::Verbose)
+                  link_cmd += "-v ";
+              }
+
+              for (const auto &obj : ctx->object_files)
+                link_cmd += " " + obj;
+
+              if (toolchain.is_msvc) {
+                for (const auto &dep_name : transitive_deps) {
+                  if (built_library_map.count(dep_name)) {
+                    fs::path lib_path = built_library_map[dep_name];
+                    link_cmd +=
+                        " " + lib_path.replace_extension(".lib").string() + " ";
+                  }
+                }
+                for (const auto &sys_lib : target.system_libs)
+                  link_cmd += " " + sys_lib + ".lib ";
+              } else {
+                link_cmd += " -o " + target_output_file + " ";
+                for (const auto &dep_name : transitive_deps) {
+                  if (built_library_map.count(dep_name))
+                    link_cmd += " " + built_library_map[dep_name] + " ";
+                }
+                for (const auto &sys_lib : target.system_libs)
+                  link_cmd += " -l" + sys_lib + " ";
+              }
+            }
+
+            // Linker executes via standard system
+            int link_res = std::system(link_cmd.c_str());
+            if (link_res != 0) {
+              m_logger.Error("Linkage stage failed for block target: " +
+                             target_output_file);
+              global_build_failed = true;
+              break;
+            }
+          }
+
+          built_library_map[qualified_name] = target_output_file;
+
+          {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            for (const auto &rec : ctx->computed_cache_records) {
+              state_cache[rec.src] = {rec.write_time, rec.hash};
+            }
+          }
+
+          executeHooks(ctx->qt->manifest, HookTrigger::PostTargetBuild,
+                       target.name);
+
+          completed_targets_count++;
+          for (const auto &dep : dependents_graph[qualified_name]) {
+            in_degree[dep]--;
+            if (in_degree[dep] == 0 && pipeline_targets.contains(dep)) {
+              ready_targets.push(dep);
+            }
+          }
+
+          it = active_targets_running.erase(it);
+          break;
+        } else {
+          ++it;
+        }
       }
     }
+  }
+  sched_lock.unlock();
 
-    executeHooks(qt->manifest, HookTrigger::PostTargetBuild, target.name);
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    workers_should_terminate = true;
+  }
+  queue_cv.notify_all();
+
+  for (auto &worker : workers) {
+    if (worker.joinable())
+      worker.join();
+  }
+
+  if (global_build_failed) {
+    m_logger.Error("Concurrency Pipeline Terminated: A step dropped "
+                   "compilation or link error.");
+    return false;
   }
 
   std::ofstream out_cache(cache_path);
@@ -1184,8 +1377,6 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
                             build_end_time - build_start_time)
                             .count();
 
-  // FIXED: Purged pure std::cout structures. Telemetry output streams strictly
-  // via log routing variants.
   if (m_options.verbosity != Verbosity::Quiet) {
     m_logger.Success("Build completed successfully in " +
                      std::to_string(total_duration) + "ms.");
