@@ -39,7 +39,13 @@ static int executeCommandFast(const std::vector<std::string> &args) {
     return -1;
 
 #if defined(_WIN32) || defined(_WIN64)
+  // Pre-calculate needed capacity to avoid multiple allocations
+  size_t total_len = 0;
+  for (const auto &a : args)
+    total_len += a.size() + 1;
+
   std::string command;
+  command.reserve(total_len);
   for (size_t i = 0; i < args.size(); ++i) {
     command += args[i];
     if (i + 1 < args.size())
@@ -814,8 +820,9 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
   int total_pipeline_targets = 0;
   std::atomic<bool> global_build_failed{false};
 
-  std::atomic<int> completed_compilation_units{0};
-  int processed_compilation_units = 0;
+  // OPTIMIZATION: Fine-grained tracking of total file tasks completed globally
+  std::atomic<int> completed_file_tasks{0};
+  int processed_file_tasks = 0;
 
   for (const auto &qualified_name : build_order) {
     const QualifiedTarget *qt = FindByQualifiedName(qualified_name);
@@ -841,11 +848,13 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
 
   struct FileTask {
     std::string src;
-    std::vector<std::string>
-        compile_args; // OPTIMIZATION: Structured arg vector!
     std::string obj_file;
+    std::string chosen_compiler;
+    std::string final_std_flag;
+    std::shared_ptr<const std::vector<std::string>>
+        shared_base_args; // Zero-copy optimization!
     std::string working_directory;
-    size_t task_idx;
+    bool is_msvc;
   };
 
   struct CacheRecord {
@@ -898,16 +907,13 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
         const auto &task = work_item.second;
 
         if (global_build_failed || ctx->failed) {
-          if (ctx->remaining_files.fetch_sub(1) == 1) {
-            completed_compilation_units.fetch_add(1);
-            std::unique_lock<std::mutex> sched_lock(scheduler_mutex);
-            scheduler_cv.notify_one();
-          }
+          ctx->remaining_files.fetch_sub(1);
+          completed_file_tasks.fetch_add(1);
+          std::unique_lock<std::mutex> sched_lock(scheduler_mutex);
+          scheduler_cv.notify_one();
           continue;
         }
 
-        // OPTIMIZATION: Check cache completely off the main thread inside the
-        // worker!
         bool need_compile = true;
         std::string current_time;
         try {
@@ -931,12 +937,30 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
           total_cache_misses++;
           ctx->requires_linkage = true;
 
-          // OPTIMIZATION: Format JSON string BEFORE locking mutex to prevent
-          // thread contention
+          // Worker-Thread Allocation: Build the vector right before execution,
+          // entirely off the main thread.
+          std::vector<std::string> file_args;
+          file_args.reserve(task.shared_base_args->size() + 5);
+          file_args.push_back(task.chosen_compiler);
+          file_args.push_back(task.final_std_flag);
+          for (const auto &a : *task.shared_base_args)
+            file_args.push_back(a);
+
+          if (task.is_msvc) {
+            file_args.push_back("/c");
+            file_args.push_back(task.src);
+            file_args.push_back("/Fo" + task.obj_file);
+          } else {
+            file_args.push_back("-c");
+            file_args.push_back(task.src);
+            file_args.push_back("-o");
+            file_args.push_back(task.obj_file);
+          }
+
           std::string full_command_str;
-          for (size_t a = 0; a < task.compile_args.size(); ++a) {
-            full_command_str += task.compile_args[a];
-            if (a + 1 < task.compile_args.size())
+          for (size_t a = 0; a < file_args.size(); ++a) {
+            full_command_str += file_args[a];
+            if (a + 1 < file_args.size())
               full_command_str += " ";
           }
 
@@ -958,13 +982,12 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
             compile_commands_entries.push_back(std::move(json_str));
           }
 
-          int res = executeCommandFast(task.compile_args);
+          int res = executeCommandFast(file_args);
 
           if (res != 0) {
             ctx->failed = true;
             global_build_failed = true;
           } else {
-            // Register cache hit success
             if (!current_time.empty()) {
               std::lock_guard<std::mutex> rec_lock(ctx->cache_records_mutex);
               ctx->computed_cache_records.push_back(
@@ -973,8 +996,9 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
           }
         }
 
-        if (ctx->remaining_files.fetch_sub(1) == 1) {
-          completed_compilation_units.fetch_add(1);
+        ctx->remaining_files.fetch_sub(1);
+        completed_file_tasks.fetch_add(1);
+        {
           std::unique_lock<std::mutex> sched_lock(scheduler_mutex);
           scheduler_cv.notify_one();
         }
@@ -1027,26 +1051,26 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
                           "]");
       }
 
-      // Pre-build structured argument tokens instead of a giant string
-      std::vector<std::string> base_args;
+      // Zero-Copy Foundation: Allocate shared base args exactly once per target
+      auto base_args = std::make_shared<std::vector<std::string>>();
       if (!toolchain.is_msvc) {
-        base_args.push_back("-fPIC");
+        base_args->push_back("-fPIC");
         if (m_options.profile == BuildProfile::Release) {
-          base_args.push_back("-O3");
-          base_args.push_back("-DNDEBUG");
+          base_args->push_back("-O3");
+          base_args->push_back("-DNDEBUG");
         } else {
-          base_args.push_back("-g");
-          base_args.push_back("-O0");
+          base_args->push_back("-g");
+          base_args->push_back("-O0");
         }
       } else {
         if (m_options.profile == BuildProfile::Release) {
-          base_args.push_back("/O2");
-          base_args.push_back("/DNDEBUG");
-          base_args.push_back("/EHsc");
+          base_args->push_back("/O2");
+          base_args->push_back("/DNDEBUG");
+          base_args->push_back("/EHsc");
         } else {
-          base_args.push_back("/Zi");
-          base_args.push_back("/Od");
-          base_args.push_back("/EHsc");
+          base_args->push_back("/Zi");
+          base_args->push_back("/Od");
+          base_args->push_back("/EHsc");
         }
       }
 
@@ -1056,7 +1080,7 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
 
       std::vector<std::string> active_flags = target.getActiveFlags(eval_cb);
       for (const auto &flag : active_flags)
-        base_args.push_back(flag);
+        base_args->push_back(flag);
 
       std::string base =
           qt->manifest->base_dir.empty() ? "." : qt->manifest->base_dir;
@@ -1066,13 +1090,13 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
         fs::path inc_path(inc);
         if (inc_path.is_relative())
           inc_path = fs::path(base) / inc_path;
-        base_args.push_back(inc_prefix + inc_path.lexically_normal().string());
+        base_args->push_back(inc_prefix + inc_path.lexically_normal().string());
       }
       for (const auto &inc : qt->manifest->project.include_dirs) {
         fs::path inc_path(inc);
         if (inc_path.is_relative())
           inc_path = fs::path(base) / inc_path;
-        base_args.push_back(inc_prefix + inc_path.lexically_normal().string());
+        base_args->push_back(inc_prefix + inc_path.lexically_normal().string());
       }
 
       auto transitive_deps = getTransitiveDependencies(current_ready);
@@ -1093,7 +1117,7 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
               std::string norm_inc = dep_inc_path.lexically_normal().string();
               if (!seen_includes.contains(norm_inc)) {
                 seen_includes.insert(norm_inc);
-                base_args.push_back(inc_prefix + norm_inc);
+                base_args->push_back(inc_prefix + norm_inc);
               }
             }
           }
@@ -1112,12 +1136,12 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
                   this->evaluateConditionExpression(pg.condition.value(),
                                                     target, qt->manifest)) {
                 for (const auto &def : pg.defines)
-                  base_args.push_back(def_prefix + def);
+                  base_args->push_back(def_prefix + def);
               }
             }
           }
         } else {
-          base_args.push_back(def_prefix + prop_ref);
+          base_args->push_back(def_prefix + prop_ref);
         }
       }
 
@@ -1149,34 +1173,13 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
         std::string obj_file = out_obj_path.string();
         ctx->object_files[idx] = obj_file;
 
-        // Build the specific argument vector for this individual file
-        std::vector<std::string> file_args;
-        file_args.push_back(chosen_compiler);
-        file_args.push_back(final_std_flag);
-        for (const auto &a : base_args)
-          file_args.push_back(a);
-
-        if (toolchain.is_msvc) {
-          file_args.push_back("/c");
-          file_args.push_back(src);
-          file_args.push_back("/Fo" + obj_file);
-        } else {
-          file_args.push_back("-c");
-          file_args.push_back(src);
-          file_args.push_back("-o");
-          file_args.push_back(obj_file);
-        }
-
-        // Blindly push to queue without doing I/O cache checks here! Worker
-        // handles it.
-        localized_tasks.push_back(
-            {src, std::move(file_args), obj_file, working_directory, idx});
+        localized_tasks.push_back({src, obj_file, chosen_compiler,
+                                   final_std_flag, base_args, working_directory,
+                                   toolchain.is_msvc});
       }
 
       if (localized_tasks.empty()) {
         ctx->remaining_files = 0;
-        completed_compilation_units.fetch_add(1);
-        scheduler_cv.notify_one();
       } else {
         ctx->remaining_files = localized_tasks.size();
         {
@@ -1192,138 +1195,133 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
 
     scheduler_cv.wait(sched_lock, [&]() {
       return global_build_failed ||
-             (completed_compilation_units.load() > processed_compilation_units);
+             (completed_file_tasks.load() > processed_file_tasks);
     });
 
     if (global_build_failed)
       break;
 
-    while (completed_compilation_units.load() > processed_compilation_units) {
-      processed_compilation_units++;
+    // Immediately catch up processed tracker
+    processed_file_tasks = completed_file_tasks.load();
 
-      for (auto it = active_targets_running.begin();
-           it != active_targets_running.end();) {
-        auto ctx = *it;
-        if (ctx->remaining_files == 0) {
-          if (ctx->failed) {
+    for (auto it = active_targets_running.begin();
+         it != active_targets_running.end();) {
+      auto ctx = *it;
+      if (ctx->remaining_files.load() == 0) {
+        if (ctx->failed) {
+          global_build_failed = true;
+          break;
+        }
+
+        const Target &target = ctx->qt->target;
+        std::string qualified_name = ctx->qt->qualifiedName;
+
+        std::string target_output_file;
+#if defined(_WIN32) || defined(_WIN64)
+        if (target.type == TargetType::Executable)
+          target_output_file = target_build_dir + "/" + target.name + ".exe";
+        else if (target.type == TargetType::StaticLibrary)
+          target_output_file = target_build_dir + "/" + target.name + ".lib";
+        else if (target.type == TargetType::SharedLibrary)
+          target_output_file = target_build_dir + "/" + target.name + ".dll";
+#elif defined(__APPLE__)
+        if (target.type == TargetType::Executable)
+          target_output_file = target_build_dir + "/" + target.name;
+        else if (target.type == TargetType::StaticLibrary)
+          target_output_file = target_build_dir + "/lib" + target.name + ".a";
+        else if (target.type == TargetType::SharedLibrary)
+          target_output_file =
+              target_build_dir + "/lib" + target.name + ".dylib";
+#else
+        if (target.type == TargetType::Executable)
+          target_output_file = target_build_dir + "/" + target.name;
+        else if (target.type == TargetType::StaticLibrary)
+          target_output_file = target_build_dir + "/lib" + target.name + ".a";
+        else if (target.type == TargetType::SharedLibrary)
+          target_output_file = target_build_dir + "/lib" + target.name + ".so";
+#endif
+
+        if (ctx->requires_linkage || !fs::exists(target_output_file)) {
+          std::string link_cmd;
+          auto transitive_deps = getTransitiveDependencies(qualified_name);
+          std::reverse(transitive_deps.begin(), transitive_deps.end());
+
+          if (target.type == TargetType::StaticLibrary) {
+            link_cmd =
+                toolchain.is_msvc
+                    ? (toolchain.archiver + " /OUT:" + target_output_file)
+                    : (toolchain.archiver + " rcs " + target_output_file);
+            for (const auto &obj : ctx->object_files)
+              link_cmd += " " + obj;
+          } else {
+            if (toolchain.is_msvc) {
+              link_cmd = "link /OUT:" + target_output_file + " ";
+              if (target.type == TargetType::SharedLibrary)
+                link_cmd += "/DLL ";
+            } else {
+              link_cmd =
+                  toolchain.cpp_compiler + " " +
+                  (target.type == TargetType::SharedLibrary ? "-shared " : "");
+              if (m_options.verbosity == Verbosity::Verbose)
+                link_cmd += "-v ";
+            }
+
+            for (const auto &obj : ctx->object_files)
+              link_cmd += " " + obj;
+
+            if (toolchain.is_msvc) {
+              for (const auto &dep_name : transitive_deps) {
+                if (built_library_map.count(dep_name)) {
+                  fs::path lib_path = built_library_map[dep_name];
+                  link_cmd +=
+                      " " + lib_path.replace_extension(".lib").string() + " ";
+                }
+              }
+              for (const auto &sys_lib : target.system_libs)
+                link_cmd += " " + sys_lib + ".lib ";
+            } else {
+              link_cmd += " -o " + target_output_file + " ";
+              for (const auto &dep_name : transitive_deps) {
+                if (built_library_map.count(dep_name))
+                  link_cmd += " " + built_library_map[dep_name] + " ";
+              }
+              for (const auto &sys_lib : target.system_libs)
+                link_cmd += " -l" + sys_lib + " ";
+            }
+          }
+
+          int link_res = std::system(link_cmd.c_str());
+          if (link_res != 0) {
+            m_logger.Error("Linkage stage failed for block target: " +
+                           target_output_file);
             global_build_failed = true;
             break;
           }
-
-          const Target &target = ctx->qt->target;
-          std::string qualified_name = ctx->qt->qualifiedName;
-
-          std::string target_output_file;
-#if defined(_WIN32) || defined(_WIN64)
-          if (target.type == TargetType::Executable)
-            target_output_file = target_build_dir + "/" + target.name + ".exe";
-          else if (target.type == TargetType::StaticLibrary)
-            target_output_file = target_build_dir + "/" + target.name + ".lib";
-          else if (target.type == TargetType::SharedLibrary)
-            target_output_file = target_build_dir + "/" + target.name + ".dll";
-#elif defined(__APPLE__)
-          if (target.type == TargetType::Executable)
-            target_output_file = target_build_dir + "/" + target.name;
-          else if (target.type == TargetType::StaticLibrary)
-            target_output_file = target_build_dir + "/lib" + target.name + ".a";
-          else if (target.type == TargetType::SharedLibrary)
-            target_output_file =
-                target_build_dir + "/lib" + target.name + ".dylib";
-#else
-          if (target.type == TargetType::Executable)
-            target_output_file = target_build_dir + "/" + target.name;
-          else if (target.type == TargetType::StaticLibrary)
-            target_output_file = target_build_dir + "/lib" + target.name + ".a";
-          else if (target.type == TargetType::SharedLibrary)
-            target_output_file =
-                target_build_dir + "/lib" + target.name + ".so";
-#endif
-
-          if (ctx->requires_linkage || !fs::exists(target_output_file)) {
-            std::string link_cmd;
-            auto transitive_deps = getTransitiveDependencies(qualified_name);
-            std::reverse(transitive_deps.begin(), transitive_deps.end());
-
-            if (target.type == TargetType::StaticLibrary) {
-              link_cmd =
-                  toolchain.is_msvc
-                      ? (toolchain.archiver + " /OUT:" + target_output_file)
-                      : (toolchain.archiver + " rcs " + target_output_file);
-              for (const auto &obj : ctx->object_files)
-                link_cmd += " " + obj;
-            } else {
-              if (toolchain.is_msvc) {
-                link_cmd = "link /OUT:" + target_output_file + " ";
-                if (target.type == TargetType::SharedLibrary)
-                  link_cmd += "/DLL ";
-              } else {
-                link_cmd =
-                    toolchain.cpp_compiler + " " +
-                    (target.type == TargetType::SharedLibrary ? "-shared "
-                                                              : "");
-                if (m_options.verbosity == Verbosity::Verbose)
-                  link_cmd += "-v ";
-              }
-
-              for (const auto &obj : ctx->object_files)
-                link_cmd += " " + obj;
-
-              if (toolchain.is_msvc) {
-                for (const auto &dep_name : transitive_deps) {
-                  if (built_library_map.count(dep_name)) {
-                    fs::path lib_path = built_library_map[dep_name];
-                    link_cmd +=
-                        " " + lib_path.replace_extension(".lib").string() + " ";
-                  }
-                }
-                for (const auto &sys_lib : target.system_libs)
-                  link_cmd += " " + sys_lib + ".lib ";
-              } else {
-                link_cmd += " -o " + target_output_file + " ";
-                for (const auto &dep_name : transitive_deps) {
-                  if (built_library_map.count(dep_name))
-                    link_cmd += " " + built_library_map[dep_name] + " ";
-                }
-                for (const auto &sys_lib : target.system_libs)
-                  link_cmd += " -l" + sys_lib + " ";
-              }
-            }
-
-            // Linker executes via standard system
-            int link_res = std::system(link_cmd.c_str());
-            if (link_res != 0) {
-              m_logger.Error("Linkage stage failed for block target: " +
-                             target_output_file);
-              global_build_failed = true;
-              break;
-            }
-          }
-
-          built_library_map[qualified_name] = target_output_file;
-
-          {
-            std::lock_guard<std::mutex> lock(cache_mutex);
-            for (const auto &rec : ctx->computed_cache_records) {
-              state_cache[rec.src] = {rec.write_time, rec.hash};
-            }
-          }
-
-          executeHooks(ctx->qt->manifest, HookTrigger::PostTargetBuild,
-                       target.name);
-
-          completed_targets_count++;
-          for (const auto &dep : dependents_graph[qualified_name]) {
-            in_degree[dep]--;
-            if (in_degree[dep] == 0 && pipeline_targets.contains(dep)) {
-              ready_targets.push(dep);
-            }
-          }
-
-          it = active_targets_running.erase(it);
-          break;
-        } else {
-          ++it;
         }
+
+        built_library_map[qualified_name] = target_output_file;
+
+        {
+          std::lock_guard<std::mutex> lock(cache_mutex);
+          for (const auto &rec : ctx->computed_cache_records) {
+            state_cache[rec.src] = {rec.write_time, rec.hash};
+          }
+        }
+
+        executeHooks(ctx->qt->manifest, HookTrigger::PostTargetBuild,
+                     target.name);
+
+        completed_targets_count++;
+        for (const auto &dep : dependents_graph[qualified_name]) {
+          in_degree[dep]--;
+          if (in_degree[dep] == 0 && pipeline_targets.contains(dep)) {
+            ready_targets.push(dep);
+          }
+        }
+
+        it = active_targets_running.erase(it);
+      } else {
+        ++it;
       }
     }
   }
