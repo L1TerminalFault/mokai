@@ -20,6 +20,7 @@
 #include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
+#define NOMINMAX
 #include <windows.h>
 #else
 #include <spawn.h>
@@ -31,9 +32,6 @@ namespace fs = std::filesystem;
 
 namespace mokai {
 
-// ============================================================================
-// High-Performance Native Process Spawner (Vector-based)
-// ============================================================================
 static int executeCommandFast(const std::vector<std::string> &args) {
   if (args.empty())
     return -1;
@@ -1353,7 +1351,7 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
   }
 
   if (!compile_commands_entries.empty()) {
-    std::ofstream db_file(target_build_dir + "/compile_commands.json");
+    std::ofstream db_file(output_root + "/compile_commands.json");
     if (db_file.is_open()) {
       db_file << "[\n";
       for (size_t i = 0; i < compile_commands_entries.size(); ++i) {

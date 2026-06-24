@@ -9,7 +9,6 @@
 
 namespace mokai {
 
-// Forward declaration to break circular dependency with cli.hpp
 struct GlobalOptions;
 
 class Graph {

@@ -3,6 +3,7 @@
 #include "core/os.hpp" // Integrated platform hooks
 #include "graph/graph.hpp"
 #include "log/log.h"
+#include "templates/template.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <expected>
@@ -20,6 +21,7 @@
 #if defined(_WIN32) || defined(_WIN64)
 #include <conio.h>
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #else
 #include <termios.h>
@@ -593,8 +595,7 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
 
   std::string project_name;
 
-  // FIXED: If argument is passed explicitly (e.g., mokai create myapp), use it
-  // and fake input render
+  // Use argument if explicitly passed (e.g., mokai create myapp)
   if (!args.empty() && !args[0].empty()) {
     project_name = args[0];
     std::println("{}{}{} {}› {}{}", Style::Green, Style::Success,
@@ -611,71 +612,59 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
                                         project_name + "' already exists"});
   }
 
+  // Choose C++ standard language version target
   std::vector<std::string> cpp_versions = {"c++11", "c++14", "c++17",
                                            "c++20", "c++23", "c++26"};
   size_t cpp_idx = promptChoice(
       "Select C++ Language Specification Target:", cpp_versions, 4);
   std::string chosen_cpp = cpp_versions[cpp_idx];
 
-#ifdef MOKAI_TEMPLATE_DIR
-  fs::path template_root = fs::path(MOKAI_TEMPLATE_DIR);
-#else
-  fs::path template_root = fs::current_path() / "src/templates";
-#endif
+  // Initialize our new embedded blueprint generation subsystem
+  TemplateGen template_engine;
+  auto raw_available = template_engine.getAvailableTemplates();
 
-  if (!fs::exists(template_root) || !fs::is_directory(template_root)) {
-    return std::unexpected(CliError{
-        CliError::Code::GeneralFailure,
-        "Template Engine Error: blueprint resource directory not found at " +
-            template_root.string()});
+  if (raw_available.empty()) {
+    return std::unexpected(
+        CliError{CliError::Code::GeneralFailure,
+                 "Template Engine Error: No embedded "
+                 "blueprint skeletons found inside the binary"});
   }
 
+  // Extract clean template list for choice visualization
   std::vector<std::string> available_templates;
-  for (const auto &entry : fs::directory_iterator(template_root)) {
-    if (entry.is_directory()) {
-      available_templates.push_back(entry.path().filename().string());
-    }
+  for (const auto &[name, desc] : raw_available) {
+    available_templates.push_back(name + " (" + desc + ")");
   }
-
-  if (available_templates.empty()) {
-    return std::unexpected(CliError{CliError::Code::GeneralFailure,
-                                    "Template Engine Error: blueprint resource "
-                                    "directory is completely empty"});
-  }
-
   std::sort(available_templates.begin(), available_templates.end());
+
   size_t template_idx = promptChoice(
       "Select Project Skeleton Blueprint:", available_templates, 0);
-  std::string chosen_template = available_templates[template_idx];
-  fs::path selected_template_path = template_root / chosen_template;
+
+  // Extract pure key name from chosen visual item string
+  std::string chosen_template = raw_available[template_idx].first;
 
   std::vector<std::string> git_options = {"Yes", "No"};
   size_t git_idx = promptChoice(
       "Initialize empty local Git version control tree?", git_options, 0);
   bool init_git = (git_idx == 0);
 
-  std::print("\n{}⠋ Spawning environment scaffolding...{}\r", Style::Dim,
-             Style::Reset);
+  std::print(
+      "\n{}⠋ Spawning environment scaffolding from embedded memory...{}\r",
+      Style::Dim, Style::Reset);
   std::fflush(stdout);
 
-  try {
-    fs::create_directories(target_dir);
-    fs::copy(selected_template_path, target_dir,
-             fs::copy_options::recursive |
-                 fs::copy_options::overwrite_existing);
-    processTemplatePlaceholders(target_dir / "mokai.toml", project_name,
-                                chosen_cpp);
-  } catch (const fs::filesystem_error &e) {
+  // Directly call into TemplateGen to safely lay down the code tree
+  if (!template_engine.create(chosen_template, target_dir, project_name,
+                              chosen_cpp)) {
     return std::unexpected(
         CliError{CliError::Code::ProjectCreationDenied,
-                 std::string("Filesystem structural operation I/O failure: ") +
-                     e.what()});
+                 "Template Generation Error: Failed writing static embedded "
+                 "assets to storage directory."});
   }
 
   if (init_git) {
     std::unordered_map<std::string, std::string> clean_env;
-    // FIXED: Forced tracking parameters to initialize silently on standard
-    // primary trunk naming convention
+    // Silent initialization on primary trunk branch specification
     OS::ExecuteCommand("git init --initial-branch=main " + target_dir.string(),
                        clean_env);
   }
@@ -683,11 +672,12 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   std::println("\r{}{}Project setup initialized perfectly!{}", Style::Green,
                Style::Success, Style::Reset);
   std::println("");
-  std::println("  {}Location:  {} {}", Style::Dim, Style::Reset,
+  std::println("  {}Location:   {} {}", Style::Dim, Style::Reset,
                target_dir.string());
   std::println("  Navigate and trigger production builds via:");
   std::println("  {}cd {}{}", Style::Cyan, project_name, Style::Reset);
-  std::println("  {}mokai Build{}", Style::Cyan, Style::Reset);
+  std::println("  {}mokai build{}", Style::Cyan, Style::Reset);
+
   return {};
 }
 

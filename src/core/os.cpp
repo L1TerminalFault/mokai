@@ -1,8 +1,5 @@
 #include "os.hpp"
-#include <array>
 #include <cstdlib>
-#include <memory>
-#include <stdexcept>
 
 #if defined(__linux__)
 #define MOKAI_PLATFORM_LINUX

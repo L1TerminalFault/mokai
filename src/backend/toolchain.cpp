@@ -4,15 +4,9 @@
 
 namespace mokai {
 
-// ============================================================================
-// POSIX (GCC / Clang) Backend Implementation
-// ============================================================================
 class PosixToolchainBackend : public IToolchainBackend {
 public:
-  std::string GetCompilerExecutable() const override {
-    // Fallback or override logic can be injected here
-    return "clang++";
-  }
+  std::string GetCompilerExecutable() const override { return "clang++"; }
 
   std::string GetArchiverExecutable() const override { return "ar"; }
 
@@ -26,29 +20,24 @@ public:
     cmd << GetCompilerExecutable() << " -c " << src.string() << " -o "
         << obj.string();
 
-    // Optimization levels
     if (options.opt_level == OptimizationLevel::Optimize) {
       cmd << " -O3 -DNDEBUG";
     } else {
       cmd << " -O0";
     }
 
-    // Debug info
     if (options.generate_debug_symbols) {
       cmd << " -g";
     }
 
-    // Position independent code (crucial for Linux .so)
     if (options.position_independent) {
       cmd << " -fPIC";
     }
 
-    // Includes
     for (const auto &dir : options.include_dirs) {
       cmd << " -I" << dir.string();
     }
 
-    // Extra user-defined flags
     for (const auto &flag : options.custom_flags) {
       cmd << " " << flag;
     }
