@@ -3,9 +3,6 @@ name = "mokai"
 cpp_version = "c++23"
 include_dirs = ["src"]
 
-[property_group.engine_defines]
-defines = ['MOKAI_TEMPLATE_DIR="/home/k/Documents/mokai/src/templates"']
-
 [target.MOKAI]
 type = "static_library"
 sources = [
@@ -13,11 +10,12 @@ sources = [
     "src/graph/**/*.cpp", 
     "src/utils/**/*.cpp",
     "src/cli/**/*.cpp",
-    "src/log/**/*.cpp"
+    "src/log/**/*.cpp",
+    "src/templates/**/*.cpp",
+    "src/core/**/*.cpp"
 ]
 
 [target.mokai]
 type = "executable"
 sources = ["src/entery.cpp"]
-properties = ["@engine_defines"]
 depends_on = ["MOKAI"]
