@@ -22,7 +22,7 @@ mokai build
 
 That's a complete, working project.
 
-> **Status: early alpha.** Mokai is under active development. The core build pipeline (config parsing, dependency resolution, dependency graph construction, caching, parallel builds) is implemented and has been tested against real-world libraries, including [fmt](https://github.com/fmtlib/fmt) and [SFML](https://github.com/SFML/SFML). The package registry and versioning system are designed and in progress, and the full configuration reference docs are being written now. Expect rough edges, breaking changes, and missing features.
+> **Status: early alpha.** Mokai is under active development. The core build pipeline (config parsing, dependency resolution, dependency graph construction, caching, parallel builds) is implemented and verified cross-platform. Linux stability is guaranteed, and native Windows compilation has succeeded in recent test pipelines. Ready for small to medium-scale production software with local or Git-based source dependencies. Note that native package registry capabilities and cross-compilation are currently under construction. Expect rough edges and breaking changes.
 
 ---
 
@@ -34,7 +34,7 @@ Mokai's approach:
 
 * **TOML, not a scripting language.** Your project is data — targets, sources, dependencies — not a program the build system has to execute.
 * **No intermediate generator step.** Mokai compiles and links directly. No Makefiles or `.ninja` files are generated and handed off to a second tool.
-* **Dependencies that just work.** Depend on a library by name. Mokai resolves it — locally, from git, or eventually from a recipe registry — and wires up the right include paths, libraries, and link order automatically.
+* **Dependencies that just work.** Depend on a library by name or path. Mokai resolves it — locally, from git, or eventually from a recipe registry — and wires up the right include paths, libraries, and link order automatically.
 * **Caching by default.** File content hashing plus timestamps means unchanged files are never recompiled. Independent targets and sources compile in parallel.
 * **Clear, actionable errors.** Validation errors point at the exact line and field that failed, providing a helpful hint where possible rather than a wall of compiler output.
 
@@ -45,23 +45,37 @@ Mokai's approach:
 * Automatic dependency graph construction with topological build ordering and cycle detection
 * A glob engine supporting `*`, ``, and brace expansion (`{a,b}`)
 * Parallel, content-hash-cached compilation
-* `compile_commands.json` generation for editor/IDE tooling (clangd, VS Code, etc.)
+* Native compilation working on both Linux and Windows environments
+* Project bootstrapping via a straight-forward single-command execution pipeline
+* `compile_commands.json` generation for editor/IDE tooling (clangd, VS Code, etc.), automatically synchronized to your workspace root or configurable build directory
 * Project scaffolding (`mokai create`) with interactive template, C++ standard, and git-init prompts
 * Verified against real-world projects, including a full build of **fmt** with conditional compiler-version-gated warning flags, and **SFML 3**, including its transitive dependencies (FreeType, HarfBuzz, SheenBidi, miniaudio, and several X11 extension libraries)
 
 ## What's in progress
 
+* A config system in `mokai.toml` to explicitly specify target paths for `compile_commands.json` output (defaults to `build/`)
 * A central package registry, so common libraries can be added by name with no manual setup
 * Smart version resolution (`sdl >= 2.7`) against upstream git tags
 * A shared, machine-wide package cache to avoid duplicate clones across projects
-* Visual Studio "Open Folder" / solution-adjacent tooling
+* Cross-compilation toolchain infrastructure
 * Expanded diagnostics (typo suggestions, richer source-span errors)
 
 ---
 
 ## Getting started
 
-Install Mokai, then create a new project:
+### Linux Installation (One-Liner)
+
+Install the pre-compiled, stripped native binary straight into your path:
+
+```bash
+curl -fsSL [https://raw.githubusercontent.com/ketsebaoteth/mokai/main/get.sh](https://raw.githubusercontent.com/ketsebaoteth/mokai/main/get.sh) | bash
+
+```
+
+### Scaffolding a New Project
+
+To create a new environment, run:
 
 ```bash
 mokai create myapp
@@ -73,29 +87,29 @@ This starts an interactive scaffolder to pick a C++ standard, a starting templat
 ```
 ✨ Mokai Initializer – Create a new environment
 ──────────────────────────────────────────────────
-❯ Project name (my_mokai_project) myapp
-● Select C++ Language Specification Target:
-    ○ c++11
-    ○ c++14
-    ○ c++17
-    ○ c++20
-  ❯ ⦿ c++23
+Project name (my_mokai_project) myapp
+Select C++ Language Specification Target:
+    c++11
+    c++14
+    c++17
+    c++20
+  ❯ c++23
   (Use ↑/↓ or j/k to navigate. Enter to select | item 5/6)
 
-● Select Project Skeleton Blueprint:
-  ❯ ⦿ minimal
+Select Project Skeleton Blueprint:
+  ❯ minimal
   (Use ↑/↓ or j/k to navigate. Enter to select)
 
-● Initialize empty local Git version control tree?
-  ❯ ⦿ Yes
-    ○ No
+Initialize empty local Git version control tree?
+  ❯ Yes
+    No
   (Use ↑/↓ or j/k to navigate. Enter to select)
 
-✔ Project setup initialized perfectly!
+Project setup initialized perfectly!
   Location: /home/k/algos/myapp
   Navigate and trigger production builds via:
   cd myapp
-  mokai Build
+  mokai build
 
 ```
 
@@ -129,7 +143,23 @@ sources = ["./main.cpp"]
 
 ```
 
-It requires no separate build directory setup, no generator selection, and can be read top-to-bottom like regular data.
+### Advanced Layout with LSP Configuration
+
+By default, `mokai` outputs language server compilation databases to your build folder. To override this and specify exactly where `compile_commands.json` should reside, use the `[lsp]` configuration block:
+
+```toml
+[project]
+name = "myapp"
+cpp_version = "c++23"
+
+[lsp]
+compile_commands_dir = "." # Places compile_commands.json at the workspace root
+
+[target.myapp]
+type = "executable"
+sources = ["src/main.cpp"]
+
+```
 
 ### Depending on another project
 
