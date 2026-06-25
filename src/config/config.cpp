@@ -63,7 +63,6 @@ struct SemVer {
   auto operator<=>(const SemVer &) const = default;
 };
 
-// Evaluates if a given version satisfies a rule constraint like ">=3.0.0"
 static bool satisfiesConstraint(const SemVer &version,
                                 const std::string &constraint) {
   std::string clean = constraint;
@@ -100,12 +99,24 @@ static bool matchesRange(const std::string &versionStr,
 
   std::stringstream ss(rangeStr);
   std::string token;
-  // Handle comma-separated range bounds safely (e.g. ">=3.0.0, <4.0.0")
   while (std::getline(ss, token, ',')) {
     if (!satisfiesConstraint(v, token))
       return false;
   }
   return true;
+}
+
+// ============================================================================
+// Global Paths Engine
+// ============================================================================
+static fs::path getGlobalMokaiDir() {
+#if defined(_WIN32) || defined(_WIN64)
+  const char *localAppdata = std::getenv("LOCALAPPDATA");
+  return fs::path(localAppdata ? localAppdata : "C:\\") / "mokai";
+#else
+  const char *home = std::getenv("HOME");
+  return fs::path(home ? home : "/tmp") / ".mokai";
+#endif
 }
 
 Config::Config(std::string workingDir) {
@@ -156,28 +167,24 @@ Config::Config(std::string workingDir) {
   }
 
   if (auto res = parseConfig(); !res) {
-    if (!res.error().empty()) {
+    if (!res.error().empty())
       m_logger.Error(res.error());
-    }
     return;
   }
   if (auto res = extractProjectData(); !res) {
     m_logger.Error("Manifest Validation Error: Failed to build project model "
                    "from 'mokai.toml'.");
     m_logger.Error(res.error());
-    return; // Fast escape on internal tree generation errors
+    return;
   }
 }
 
 std::expected<void, std::string> Config::loadConfig(const std::string &path) {
   std::ifstream file(path);
   if (!file.is_open()) {
-    return std::unexpected(
-        "File I/O Error: Unable to open configuration file for reading.\n"
-        "  Path: \"" +
-        path +
-        "\"\n"
-        "  Hint: Check system read permissions for this file.");
+    return std::unexpected("File I/O Error: Unable to open configuration file "
+                           "for reading.\n  Path: \"" +
+                           path + "\"");
   }
 
   std::stringstream stream;
@@ -203,9 +210,8 @@ std::expected<void, std::string> Config::parseConfig() {
     std::stringstream ss(m_file_content);
     size_t current_line = 1;
     while (std::getline(ss, source_line)) {
-      if (current_line == target_line) {
+      if (current_line == target_line)
         break;
-      }
       current_line++;
     }
 
@@ -242,9 +248,7 @@ std::expected<void, std::string> Config::extractProjectData() {
 
   if (!projectTable.is_table()) {
     return std::unexpected(
-        "Validation Error: Missing global [project] block header.\n"
-        "  Hint: Every 'mokai.toml' file must begin with a defined [project] "
-        "table context.");
+        "Validation Error: Missing global [project] block header.");
   }
 
   metadata.name = projectTable["name"].value_or("");
@@ -304,68 +308,27 @@ std::expected<void, std::string> Config::extractProjectData() {
               ResolvedDependency{spec, depconfig.getManifest()};
 
         } else if (isGitDep(depStr)) {
-          std::string gitUrl = depStr.substr(4);
-          std::string repoName = gitUrl;
-          size_t lastSlash = repoName.find_last_of('/');
-          if (lastSlash != std::string::npos)
-            repoName = repoName.substr(lastSlash + 1);
-          if (repoName.ends_with(".git"))
-            repoName = repoName.substr(0, repoName.length() - 4);
-
-          std::string targetExtDir = "./build/external/" + repoName;
-          fs::create_directories("./build/external");
-
-          if (!fs::exists(targetExtDir)) {
-            m_logger.Info("Package Router: Syncing remote Git link -> " +
-                          gitUrl);
-            std::string cloneCmd =
-                "git clone --progress " + gitUrl + " " + targetExtDir;
-            if (std::system(cloneCmd.c_str()) != 0) {
-              return std::unexpected("Package Router Error: Link cloning "
-                                     "transaction interrupted for asset -> " +
-                                     gitUrl);
-            }
-          } else {
-            m_logger.Info(
-                "Package Router: Fetching standard tree updates for -> " +
-                repoName);
-            std::string pullCmd = "git -C " + targetExtDir + " pull --progress";
-            if (std::system(pullCmd.c_str()) != 0) {
-              return std::unexpected("Package Router Error: Local pipeline "
-                                     "pull transaction dropped out for -> " +
-                                     repoName);
-            }
-          }
-
-          std::string depTomlPath = targetExtDir + "/mokai.toml";
-          if (fs::exists(depTomlPath)) {
-            Config depconfig(targetExtDir);
-            DependencySpec spec{depStr, ""};
-            m_manifest.resolved_dependencies[depStr] =
-                ResolvedDependency{spec, depconfig.getManifest()};
-          } else {
-            return std::unexpected(
-                "Package Router Error: Cloned asset is missing a 'mokai.toml' "
-                "target configuration: " +
-                targetExtDir);
-          }
-
+          return std::unexpected(
+              "Package Router Error: Direct 'git:' dependencies have been "
+              "deprecated. Please use the Global Registry.");
         } else {
+          // ============================================================================
+          // NEW GLOBAL REGISTRY PACKAGE MANAGER ROUTER
+          // ============================================================================
           std::string pkgName = depStr;
-          std::string pkgVersionSpec = "";
+          std::string pkgVersionSpec = "latest";
           size_t versionDelim = depStr.find('@');
           if (versionDelim != std::string::npos) {
             pkgName = depStr.substr(0, versionDelim);
             pkgVersionSpec = depStr.substr(versionDelim + 1);
           }
 
-          const char *homeEnv = std::getenv("HOME");
-          fs::path homePath = homeEnv ? fs::path(homeEnv) : fs::current_path();
-          fs::path registryDir = homePath / ".mokai" / "registry";
+          fs::path globalMokai = getGlobalMokaiDir();
+          fs::path registryDir = globalMokai / "registry";
 
           if (!fs::exists(registryDir)) {
-            m_logger.Info(
-                "Package Router: Syncing central registry context mappings...");
+            m_logger.Info("Package Router: Initializing global mokai registry "
+                          "for the first time...");
             fs::create_directories(registryDir.parent_path());
             std::string regCloneCmd =
                 "git clone --progress "
@@ -376,18 +339,24 @@ std::expected<void, std::string> Config::extractProjectData() {
                   "Package Router Error: Critical initialization failure "
                   "syncing tracking maps.");
             }
-          } else {
-            m_logger.Info(
-                "Package Router: Syncing configuration tracking indexes...");
-            std::string regPullCmd =
-                "git -C " + registryDir.string() + " pull --progress";
-            if (std::system(regPullCmd.c_str()) != 0) {
-              m_logger.Error("Package Router Error: Local tracker framework "
-                             "could not index downstream lines.");
-            }
           }
 
           fs::path manifestRecipeFile = registryDir / (pkgName + ".toml");
+
+          // Sync the registry if the requested package doesn't exist locally
+          // yet
+          if (!fs::exists(manifestRecipeFile)) {
+            m_logger.Info("Package Router: Package '" + pkgName +
+                          "' not found locally. Syncing registry...");
+            std::string regCleanCmd = "git -C " + registryDir.string() +
+                                      " reset --hard HEAD > /dev/null 2>&1";
+            std::system(regCleanCmd.c_str());
+
+            std::string regPullCmd =
+                "git -C " + registryDir.string() + " pull --rebase --progress";
+            std::system(regPullCmd.c_str());
+          }
+
           if (fs::exists(manifestRecipeFile)) {
             std::ifstream rFile(manifestRecipeFile.string());
             std::stringstream rStream;
@@ -395,111 +364,80 @@ std::expected<void, std::string> Config::extractProjectData() {
 
             try {
               auto rootRegistryNode = toml::parse(rStream.str());
-              std::string gitHubHandle =
-                  rootRegistryNode["package"]["github"].value_or("");
-              std::string matchedRecipePath = "";
-              std::string targetGitRef = "";
 
-              if (auto *recipeArray =
-                      rootRegistryNode["package"]["recipe"].as_array()) {
-                for (auto &&recipeNode : *recipeArray) {
-                  if (auto *tbl = recipeNode.as_table()) {
-                    std::string vRange = (*tbl)["version_range"].value_or("");
-                    std::string cPath = (*tbl)["mokaiconf_path"].value_or("");
-                    std::string gitRef =
-                        (*tbl)["tag"].value_or((*tbl)["branch"].value_or(
-                            (*tbl)["commit"].value_or("")));
+              std::string gitRepo = rootRegistryNode["project"]["git_repo"]
+                                        .value<std::string>()
+                                        .value_or("");
+              if (gitRepo.empty()) {
+                return std::unexpected(
+                    "Registry Error: Package '" + pkgName +
+                    "' is missing 'project.git_repo' mapping.");
+              }
 
-                    if (matchedRecipePath.empty()) {
-                      matchedRecipePath = cPath;
-                      targetGitRef = gitRef;
-                    }
-                    if (!pkgVersionSpec.empty() &&
-                        matchesRange(pkgVersionSpec, vRange)) {
-                      matchedRecipePath = cPath;
-                      targetGitRef = gitRef;
-                    }
-                  }
+              std::string packageGitUrl = gitRepo;
+              if (!packageGitUrl.starts_with("http")) {
+                packageGitUrl = "https://github.com/" + packageGitUrl;
+              }
+
+              // Extract the embedded inline TOML recipe string
+              std::string recipeTomlContent = "";
+              if (auto *recipesTable = rootRegistryNode["recipes"].as_table()) {
+                if (auto specNode = recipesTable->get(pkgVersionSpec)) {
+                  recipeTomlContent =
+                      specNode->value<std::string>().value_or("");
+                } else if (auto latestNode = recipesTable->get("latest")) {
+                  recipeTomlContent =
+                      latestNode->value<std::string>().value_or("");
+                  m_logger.Warn("Notice: Exact version '" + pkgVersionSpec +
+                                "' not found for '" + pkgName +
+                                "'. Falling back to 'latest'.");
                 }
               }
 
-              if (!gitHubHandle.empty() && !matchedRecipePath.empty()) {
-                std::string packageGitUrl =
-                    "https://github.com/" + gitHubHandle;
-                std::string targetPkgBuildDir = "./build/external/" + pkgName;
-                fs::create_directories("./build/external");
+              if (recipeTomlContent.empty()) {
+                return std::unexpected("Registry Error: Could not resolve a "
+                                       "valid recipe string for package '" +
+                                       pkgName + "'.");
+              }
 
-                if (!fs::exists(targetPkgBuildDir)) {
-                  m_logger.Info(
-                      "Package Router: Downloading source files for [" +
-                      pkgName + "] -> " + packageGitUrl);
-                  std::string pkgCloneCmd = "git clone --progress " +
-                                            packageGitUrl + " " +
-                                            targetPkgBuildDir;
-                  if (std::system(pkgCloneCmd.c_str()) != 0) {
-                    return std::unexpected(
-                        "Package Router Error: Failed to completely clone "
-                        "remote package source layout: " +
-                        pkgName);
-                  }
-                } else {
-                  m_logger.Info(
-                      "Package Router: Syncing remote tracking trees for [" +
-                      pkgName + "]");
-                  std::string pkgFetchCmd = "git -C " + targetPkgBuildDir +
-                                            " fetch --all --tags --progress";
-                  if (std::system(pkgFetchCmd.c_str()) != 0) {
-                    return std::unexpected(
-                        "Package Router Error: Tracker failed tracking live "
-                        "heads for package: " +
-                        pkgName);
-                  }
-                }
+              fs::path targetPkgBuildDir = globalMokai / "packages" / pkgName;
+              fs::create_directories(targetPkgBuildDir.parent_path());
 
-                if (!targetGitRef.empty()) {
-                  m_logger.Info("Package Router: Pointing target branch layout "
-                                "tracking ref to -> " +
-                                targetGitRef);
-                  std::string checkoutCmd = "git -C " + targetPkgBuildDir +
-                                            " checkout " + targetGitRef;
-                  if (std::system(checkoutCmd.c_str()) != 0) {
-                    return std::unexpected(
-                        "Package Router Error: Reference context tracking map "
-                        "rejected reference payload alignment: " +
-                        targetGitRef);
-                  }
-                }
-
-                fs::path blueprintConfSource = registryDir / matchedRecipePath;
-                fs::path destinationConfTarget =
-                    fs::path(targetPkgBuildDir) / "mokai.toml";
-
-                if (fs::exists(blueprintConfSource)) {
-                  fs::copy_file(blueprintConfSource, destinationConfTarget,
-                                fs::copy_options::overwrite_existing);
-
-                  Config depconfig(targetPkgBuildDir);
-                  DependencySpec spec{depStr, pkgVersionSpec};
-                  m_manifest.resolved_dependencies[pkgName] =
-                      ResolvedDependency{spec, depconfig.getManifest()};
-                } else {
+              if (!fs::exists(targetPkgBuildDir)) {
+                m_logger.Info("Package Manager: Cloning [" + pkgName +
+                              "] globally -> " + packageGitUrl);
+                std::string pkgCloneCmd = "git clone --progress " +
+                                          packageGitUrl + " " +
+                                          targetPkgBuildDir.string();
+                if (std::system(pkgCloneCmd.c_str()) != 0) {
                   return std::unexpected(
-                      "Registry Routing Error: Structural config blueprints "
-                      "could not be mapped: " +
-                      blueprintConfSource.string());
+                      "Package Manager Error: Failed to clone package: " +
+                      pkgName);
                 }
               }
-            } catch (...) {
-              return std::unexpected(
-                  "Registry Parsing Failure: Content formatting tracking logic "
-                  "corrupted for: " +
-                  pkgName);
+
+              // Write the embedded registry TOML recipe out to the package
+              // directory
+              fs::path destinationConfTarget = targetPkgBuildDir / "mokai.toml";
+              std::ofstream outToml(destinationConfTarget.string());
+              outToml << recipeTomlContent;
+              outToml.close();
+
+              // Recursively evaluate the newly injected package
+              Config depconfig(targetPkgBuildDir.string());
+              DependencySpec spec{depStr, pkgVersionSpec};
+              m_manifest.resolved_dependencies[pkgName] =
+                  ResolvedDependency{spec, depconfig.getManifest()};
+
+            } catch (const std::exception &e) {
+              return std::unexpected(std::string("Registry Parsing Failure: ") +
+                                     e.what());
             }
           } else {
-            return std::unexpected(
-                "Registry Resolution Failure: The library package tracking map "
-                "'" +
-                pkgName + "' does not exist in central configurations.");
+            return std::unexpected("Registry Resolution Failure: The library "
+                                   "package tracking map '" +
+                                   pkgName +
+                                   "' does not exist in central registry.");
           }
         }
       }
@@ -567,11 +505,10 @@ std::expected<void, std::string> Config::extractProjectData() {
           target.type = TargetType::StaticLibrary;
         else if (type_str == "shared_library")
           target.type = TargetType::SharedLibrary;
-        else {
+        else
           return std::unexpected("Target Validation Error: Invalid type "
                                  "context flag inside build targets: " +
                                  target.name);
-        }
 
         extract_string_array((*inner_table)["sources"], target.sources);
         extract_string_array((*inner_table)["include_dirs"],
@@ -815,11 +752,9 @@ bool Config::runTarget(const std::string &targetName) {
 
   if (!fs::exists(absoluteOutputBinPath)) {
     m_logger.Error("Compilation Mismatch: Executable target binary not found "
-                   "at pathway location:\n"
-                   "  Path: \"" +
+                   "at pathway location:\n  Path: \"" +
                    absoluteOutputBinPath.string() +
-                   "\"\n"
-                   "  Hint: Build the pipeline layout target tracking "
+                   "\"\n  Hint: Build the pipeline layout target tracking "
                    "dependencies before launching execution units.");
     return false;
   }
@@ -836,10 +771,8 @@ bool Config::runTarget(const std::string &targetName) {
   }
 
 #if defined(_WIN32) || defined(_WIN64)
-  // Windows returns raw exit codes directly from std::system
   return exitStatus == 0;
 #else
-  // POSIX macro decoding for accurate target exit states on Linux/macOS
   return WIFEXITED(exitStatus) && WEXITSTATUS(exitStatus) == 0;
 #endif
 }
@@ -848,11 +781,9 @@ bool Config::isGitDep(std::string &str) { return str.starts_with("git:"); }
 bool Config::isLocDep(std::string &str) {
   return str.starts_with("./") || str.starts_with("../");
 }
-
 bool Config::checkIsFileAndExists(const std::string &path) {
   return fs::exists(path) && fs::is_regular_file(path);
 }
-
 bool Config::checkIsFolderAndExists(const std::string &path) {
   return fs::exists(path) && fs::is_directory(path);
 }
@@ -867,14 +798,12 @@ FuzzyFindResult Config::fuzzyFindCloseFile(std::string &path) {
 
   std::string best_match;
   size_t min_dist = 4;
-
   try {
     for (const auto &entry : fs::directory_iterator(parent)) {
       if (entry.is_regular_file()) {
         std::string entryName = entry.path().filename().string();
         size_t dist = calculateDistance(entryName, filename);
-        if (dist < min_dist && dist > 0) { // dist > 0 prevents matching exact
-                                           // file if somehow requested
+        if (dist < min_dist && dist > 0) {
           min_dist = dist;
           best_match = entry.path().string();
         }
@@ -898,7 +827,6 @@ FuzzyFindResult Config::fuzzyFindCloseFolder(std::string &path) {
 
   std::string best_match;
   size_t min_dist = 4;
-
   try {
     for (const auto &entry : fs::directory_iterator(parent)) {
       if (entry.is_directory()) {
