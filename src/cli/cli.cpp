@@ -1,6 +1,6 @@
 #include "cli.hpp"
 #include "config/config.hpp"
-#include "core/os.hpp" // Integrated platform hooks
+#include "core/os.hpp"
 #include "graph/graph.hpp"
 #include "log/log.h"
 #include "templates/template.hpp"
@@ -36,6 +36,43 @@ Cli::Cli() {
   log::Logger log;
   m_logger = log;
   m_logger.SetPrefix("mokai");
+}
+
+void Cli::initCommands() {
+  m_supported_commands["build"] = {
+      "mokai build [path]",
+      "Compiles all dependencies and targets matching structural graph rules.",
+      [this](const std::vector<std::string> &args) {
+        return handleBuild(args);
+      }};
+
+  m_supported_commands["run"] = {
+      "mokai run [target_name] [args...]",
+      "Builds and executes a project binary target, checking default_target "
+      "fallbacks.",
+      [this](const std::vector<std::string> &args) { return handleRun(args); }};
+
+  m_supported_commands["create"] = {
+      "mokai create [project_name]",
+      "Spawns a highly-optimized C++ workspace template structure from "
+      "embedded blueprints.",
+      [this](const std::vector<std::string> &args) {
+        return handleCreateProject(args);
+      }};
+
+  m_supported_commands["add"] = {"mokai add [package]",
+                                 "Injects a centralized dependency requirement "
+                                 "rule configuration into mokai.toml.",
+                                 [this](const std::vector<std::string> &args) {
+                                   return handlePackageAdd(args);
+                                 }};
+
+  m_supported_commands["help"] = {"mokai help [command]",
+                                  "Fetches deep telemetry syntax descriptions "
+                                  "for any tool subcommand toolchain routing.",
+                                  [this](const std::vector<std::string> &args) {
+                                    return handleHelp(args);
+                                  }};
 }
 
 int Cli::Run(int argc, char *argv[]) {
@@ -84,7 +121,6 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
   std::string command = "";
   std::vector<std::string> subCommandArgs;
 
-  // Modern deterministic switch evaluation
   for (size_t i = 0; i < rawArgs.size(); ++i) {
     const auto &arg = rawArgs[i];
 
@@ -126,8 +162,6 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
                    "Unrecognized system infrastructure option flag switch: '" +
                        arg + "'"});
     } else {
-      // First unflagged literal token represents our operational execution
-      // command routing target
       if (command.empty()) {
         command = arg;
       } else {
@@ -136,8 +170,6 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
     }
   }
 
-  // Update logging level constraints based on parsed environment state
-  // adjustments
   if (m_options.verbosity == Verbosity::Quiet) {
     m_logger.SetLevel(log::Level::Error);
   } else if (m_options.verbosity == Verbosity::Verbose) {
@@ -262,6 +294,118 @@ Cli::handleBuild(const std::vector<std::string> &args) {
   return {};
 }
 
+std::expected<std::monostate, CliError>
+Cli::handleRun(const std::vector<std::string> &args) {
+  fs::path workingDir = fs::current_path();
+  m_config = std::make_unique<Config>(workingDir.string());
+  auto manifest = m_config->getManifest();
+
+  if (!manifest) {
+    return std::unexpected(CliError{
+        CliError::Code::InvalidWorkspace,
+        "Unable to trace workspace root configuration manifest context."});
+  }
+
+  const Target *chosenTarget = nullptr;
+  std::vector<std::string> forwardArgs;
+
+  if (!args.empty() && !args[0].starts_with("-")) {
+    std::string explicitTargetName = args[0];
+    for (const auto &target : manifest->targets) {
+      if (target.name == explicitTargetName) {
+        chosenTarget = &target;
+        break;
+      }
+    }
+    if (!chosenTarget) {
+      return std::unexpected(
+          CliError{CliError::Code::InvalidArguments,
+                   "Explicit target lookup error: No target named '" +
+                       explicitTargetName + "' found."});
+    }
+    for (size_t i = 1; i < args.size(); ++i) {
+      forwardArgs.push_back(args[i]);
+    }
+  } else {
+    // 1. Look for explicit target flagged default_target = true
+    for (const auto &target : manifest->targets) {
+      if (target.is_default && target.type == TargetType::Executable) {
+        chosenTarget = &target;
+        break;
+      }
+    }
+    // 2. Fall back cleanly to the first Executable target found
+    if (!chosenTarget) {
+      for (const auto &target : manifest->targets) {
+        if (target.type == TargetType::Executable) {
+          chosenTarget = &target;
+          break;
+        }
+      }
+    }
+    forwardArgs = args;
+  }
+
+  if (!chosenTarget) {
+    return std::unexpected(
+        CliError{CliError::Code::InvalidArguments,
+                 "Execution match failure: No runable executable binary "
+                 "configurations map into this manifest workflow."});
+  }
+
+  if (chosenTarget->type != TargetType::Executable) {
+    return std::unexpected(CliError{
+        CliError::Code::InvalidArguments,
+        "Target validation error: '" + chosenTarget->name +
+            "' is configured as a library rule module and cannot be run."});
+  }
+
+  // Pre-trigger standard recursive compilation to keep runtime artifacts
+  // updated
+  auto buildRes = handleBuild({});
+  if (!buildRes.has_value()) {
+    return buildRes;
+  }
+
+  std::string profileFolder =
+      (m_options.profile == BuildProfile::Release) ? "release" : "debug";
+  fs::path binaryPath =
+      fs::path("./build") / profileFolder / chosenTarget->name;
+
+#if defined(_WIN32) || defined(_WIN64)
+  binaryPath.replace_extension(".exe");
+#endif
+
+  if (!fs::exists(binaryPath)) {
+    return std::unexpected(CliError{CliError::Code::GeneralFailure,
+                                    "Artifact verification failure: Compiled "
+                                    "image was expected at target path \"" +
+                                        binaryPath.string() +
+                                        "\", but file is missing."});
+  }
+
+  if (m_options.verbosity != Verbosity::Quiet) {
+    std::println("{}{} Launching production artifact: {} {}\n", Style::Green,
+                 Style::Arrow, binaryPath.string(), Style::Reset);
+  }
+
+  std::string execCommand = binaryPath.string();
+  for (const auto &fArg : forwardArgs) {
+    execCommand += " " + fArg;
+  }
+
+  std::unordered_map<std::string, std::string> emptyEnv;
+  int runtimeExitCode = OS::ExecuteCommand(execCommand, emptyEnv);
+
+  if (runtimeExitCode != 0) {
+    std::println(std::cerr,
+                 "\n{}➔ Process exited non-zero runtime status code: {}{}",
+                 Style::Red, runtimeExitCode, Style::Reset);
+  }
+
+  return {};
+}
+
 static size_t promptChoice(const std::string &title,
                            const std::vector<std::string> &options,
                            size_t default_idx = 0) {
@@ -318,11 +462,11 @@ static size_t promptChoice(const std::string &title,
 
 #if defined(_WIN32) || defined(_WIN64)
     int ch = _getch();
-    if (ch == 0 || ch == 0xE0) { // Windows extended key escape prefix
+    if (ch == 0 || ch == 0xE0) {
       ch = _getch();
-      if (ch == 72 && current_idx > 0) { // Up Arrow
+      if (ch == 72 && current_idx > 0) {
         current_idx--;
-      } else if (ch == 80 && current_idx < options.size() - 1) { // Down Arrow
+      } else if (ch == 80 && current_idx < options.size() - 1) {
         current_idx++;
       }
     } else if (ch == '\r' || ch == '\n') {
@@ -331,7 +475,7 @@ static size_t promptChoice(const std::string &title,
       current_idx--;
     } else if (ch == 'j' && current_idx < options.size() - 1) {
       current_idx++;
-    } else if (ch == 3) { // Ctrl+C interrupt handling
+    } else if (ch == 3) {
       std::print("\033[?25h");
       std::println("{}\nAborted via interrupt.{}", Style::Red, Style::Reset);
       std::exit(130);
@@ -595,7 +739,6 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
 
   std::string project_name;
 
-  // Use argument if explicitly passed (e.g., mokai create myapp)
   if (!args.empty() && !args[0].empty()) {
     project_name = args[0];
     std::println("{}{}{} {}› {}{}", Style::Green, Style::Success,
@@ -612,14 +755,12 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
                                         project_name + "' already exists"});
   }
 
-  // Choose C++ standard language version target
   std::vector<std::string> cpp_versions = {"c++11", "c++14", "c++17",
                                            "c++20", "c++23", "c++26"};
   size_t cpp_idx = promptChoice(
       "Select C++ Language Specification Target:", cpp_versions, 4);
   std::string chosen_cpp = cpp_versions[cpp_idx];
 
-  // Initialize our new embedded blueprint generation subsystem
   TemplateGen template_engine;
   auto raw_available = template_engine.getAvailableTemplates();
 
@@ -630,7 +771,6 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
                  "blueprint skeletons found inside the binary"});
   }
 
-  // Extract clean template list for choice visualization
   std::vector<std::string> available_templates;
   for (const auto &[name, desc] : raw_available) {
     available_templates.push_back(name + " (" + desc + ")");
@@ -640,7 +780,6 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   size_t template_idx = promptChoice(
       "Select Project Skeleton Blueprint:", available_templates, 0);
 
-  // Extract pure key name from chosen visual item string
   std::string chosen_template = raw_available[template_idx].first;
 
   std::vector<std::string> git_options = {"Yes", "No"};
@@ -653,7 +792,6 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
       Style::Dim, Style::Reset);
   std::fflush(stdout);
 
-  // Directly call into TemplateGen to safely lay down the code tree
   if (!template_engine.create(chosen_template, target_dir, project_name,
                               chosen_cpp)) {
     return std::unexpected(
@@ -664,7 +802,6 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
 
   if (init_git) {
     std::unordered_map<std::string, std::string> clean_env;
-    // Silent initialization on primary trunk branch specification
     OS::ExecuteCommand("git init --initial-branch=main " + target_dir.string(),
                        clean_env);
   }
