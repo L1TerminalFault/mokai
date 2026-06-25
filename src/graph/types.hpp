@@ -64,6 +64,7 @@ struct Target {
   std::vector<ConditionalProperties> properties_if;
   std::vector<ConditionalSystemLibs>
       system_libs_if; // Added for conditional system libraries
+  bool is_default = false;
 
   std::vector<std::string> getActiveSources(
       const std::function<bool(const std::string &)> &eval_fn) const;

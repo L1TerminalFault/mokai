@@ -239,8 +239,8 @@ Cli::handleBuild(const std::vector<std::string> &args) {
                  Style::Reset);
   }
 
-  Config config(workingDir.string());
-  Graph graph(config.getManifest(), m_options);
+  m_config = std::make_unique<Config>(workingDir.string());
+  Graph graph(m_config->getManifest(), m_options);
 
   auto buildOrder = graph.computeBuildOrder(graph.getEdges());
   if (buildOrder.empty()) {

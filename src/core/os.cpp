@@ -3,10 +3,15 @@
 
 #if defined(__linux__)
 #define MOKAI_PLATFORM_LINUX
+#include <sys/wait.h>
+#include <unistd.h>
 #elif defined(__APPLE__) && defined(__MACH__)
 #define MOKAI_PLATFORM_MACOS
+#include <sys/wait.h>
+#include <unistd.h>
 #elif defined(_WIN32) || defined(_WIN64)
 #define MOKAI_PLATFORM_WINDOWS
+#include <windows.h>
 #endif
 
 namespace mokai {
@@ -37,8 +42,6 @@ std::string OS::GetPlatformName() {
 }
 
 std::filesystem::path OS::GetTemporaryDirectory() {
-  // std::filesystem automatically queries $TMPDIR, $TMP, $TEMP, or /tmp based
-  // on host OS
   return std::filesystem::temp_directory_path();
 }
 
@@ -76,9 +79,8 @@ std::filesystem::path OS::FindExecutable(const std::string &name) {
   command = "which " + name + " > /dev/null 2>&1";
 #endif
 
-  // If the tool is visible via standard shell rules
   if (std::system(command.c_str()) == 0) {
-    return name; // Standard execution name can be invoked directly via shell
+    return name;
   }
   return "";
 }
@@ -89,8 +91,6 @@ int OS::ExecuteCommand(
   std::string full_expression;
 
 #if defined(MOKAI_PLATFORM_WINDOWS)
-  // On Windows, we append set commands sequentially utilizing the command
-  // linking operator (&&)
   if (!env.empty()) {
     for (const auto &[key, value] : env) {
       full_expression += "set " + key + "=" + value + " && ";
@@ -98,8 +98,6 @@ int OS::ExecuteCommand(
   }
   full_expression += command;
 #else
-  // On POSIX (Linux/macOS), inline prepended scoping acts natively: KEY=VALUE
-  // cmd
   if (!env.empty()) {
     for (const auto &[key, value] : env) {
       full_expression += key + "=" + value + " ";
@@ -109,6 +107,72 @@ int OS::ExecuteCommand(
 #endif
 
   return std::system(full_expression.c_str());
+}
+
+int OS::ExecuteBinaryAndForwardStreams(const std::string &binary_path) {
+#if defined(MOKAI_PLATFORM_WINDOWS)
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  // Bind I/O handles directly to the parent process streams
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+  si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+  ZeroMemory(&pi, sizeof(pi));
+
+  // Create child process execution string
+  std::string cmd = binary_path;
+
+  if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, TRUE, 0, NULL, NULL, &si,
+                      &pi)) {
+    return -1;
+  }
+
+  // Await binary process termination loop
+  WaitForSingleObject(pi.hProcess, INFINITE);
+
+  DWORD exit_code = 0;
+  GetExitCodeProcess(pi.hProcess, &exit_code);
+
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return static_cast<int>(exit_code);
+
+#else
+  // POSIX (Linux / macOS) implementation bypassing subshell wrapping overhead
+  pid_t pid = fork();
+
+  if (pid == -1) {
+    return -1; // Fork failure
+  }
+
+  if (pid == 0) {
+    // Inside Child Process execution context
+    char *argv[] = {const_cast<char *>(binary_path.c_str()), nullptr};
+    char *envp[] = {nullptr}; // Inherits environment state cleanly
+
+    execv(binary_path.c_str(), argv);
+
+    // If execv returns, an execution failure occurred
+    std::exit(127);
+  } else {
+    // Inside Parent Process execution context: Await tracking ID termination
+    int status = 0;
+    if (waitpid(pid, &status, 0) == -1) {
+      return -1;
+    }
+
+    if (WIFEXITED(status)) {
+      return WEXITSTATUS(status); // Normal execution return loop code
+    } else if (WIFSIGNALED(status)) {
+      return 128 +
+             WTERMSIG(status); // Process crashed or received terminating signal
+    }
+    return -1;
+  }
+#endif
 }
 
 } // namespace mokai

@@ -10,6 +10,8 @@ void Cli::initCommands() {
       {"create",
        {CREATEUSEANDEXPLANATION,
         [this](auto &args) { return handleCreateProject(args); }}},
+      {"run",
+       {RUNUSEANDEXPLANATION, [this](auto &args) { return handleRun(args); }}},
       {"add",
        {ADDUSEANDEXPLANATION,
         [this](auto &args) { return handlePackageAdd(args); }}},

@@ -27,5 +27,9 @@ namespace mokai {
                         "specific directory. If the path is omitted, "         \
                         "it defaults to the current working "                  \
                         "directory ('.')."
+#define RUNUSEANDEXPLANATION                                                   \
+  "mokai run [target]",                                                        \
+      "executes the executable you are refering too or finds the most likely " \
+      "executable to run and runs that if target is not specified "
 
 } // namespace mokai

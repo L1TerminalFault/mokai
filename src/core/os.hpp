@@ -35,6 +35,15 @@ public:
   static int
   ExecuteCommand(const std::string &command,
                  const std::unordered_map<std::string, std::string> &env = {});
+
+  /**
+   * @brief Launches a compiled binary target directly, keeping stdin, stdout,
+   * and stderr attached to the user's terminal session without subshell
+   * overhead.
+   * * @param binary_path Absolute or relative path to the executable target.
+   * @return The exit code returned natively by the child process application.
+   */
+  static int ExecuteBinaryAndForwardStreams(const std::string &binary_path);
 };
 
 } // namespace mokai

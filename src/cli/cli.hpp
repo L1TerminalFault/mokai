@@ -1,10 +1,12 @@
 #pragma once
+#include "config/config.hpp"
 #include "core/os.hpp"
 #include "exp.hpp"
 #include "log/log.h"
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -94,6 +96,7 @@ public:
 private:
   log::Logger m_logger;
   GlobalOptions m_options;
+  std::unique_ptr<Config> m_config;
   std::unordered_map<std::string, CommandInfo> m_supported_commands;
 
   void initCommands();
@@ -104,6 +107,9 @@ private:
 
   std::expected<std::monostate, CliError>
   handleBuild(const std::vector<std::string> &args);
+
+  std::expected<std::monostate, CliError>
+  handleRun(const std::vector<std::string> &args);
 
   std::expected<std::monostate, CliError>
   handlePackageAdd(const std::vector<std::string> &args);
