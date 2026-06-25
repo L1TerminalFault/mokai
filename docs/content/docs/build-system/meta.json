@@ -3,5 +3,6 @@
   "pages": [
     "dependencies",
     "hooks-and-file-groups"
-  ]
+  ],
+  "defaultOpen": true
 }

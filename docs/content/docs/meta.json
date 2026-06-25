@@ -1,6 +1,7 @@
 {
   "pages": [
     "index",
+    "commands",
     "config",
     "features",
     "build-system",

@@ -3,5 +3,6 @@
   "pages": [
     "how-mokai-builds",
     "performance-tuning"
-  ]
+  ],
+  "defaultOpen": true
 }
