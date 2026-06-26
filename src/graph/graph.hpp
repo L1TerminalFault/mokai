@@ -2,9 +2,7 @@
 
 #include "graph/types.hpp"
 #include "log/log.h"
-#include <filesystem>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -25,6 +23,7 @@ public:
   std::vector<GraphEdge> getEdges() const { return m_edges; }
   std::vector<std::string>
   getTransitiveDependencies(const std::string &qualified_name);
+  log::Logger GetLogger() { return m_logger; }
 
   bool
   evaluateConditionExpression(const std::string &condition,
@@ -33,6 +32,8 @@ public:
 
   void executeHooks(const std::shared_ptr<ProjectManifest> &manifest,
                     HookTrigger trigger, const std::string &target_name);
+
+  bool evaluateCond(const std::string &cond_expr);
 
 private:
   void populateRegistry(std::shared_ptr<ProjectManifest> manifest,
@@ -59,7 +60,6 @@ private:
 
   std::vector<std::string> expandBraceNotation(const std::string &pattern);
 
-  bool evaluateCond(const std::string &cond_expr);
   const QualifiedTarget *
   FindByQualifiedName(const std::string &qualified_name) const;
   void collectTransitive(const std::string &node,
@@ -71,7 +71,7 @@ private:
 private:
   enum class NodeState { Unvisited, Visiting, Done };
 
-  log::Logger m_logger;
+  mokai::log::Logger m_logger;
   const GlobalOptions &m_options;
 
   std::unordered_map<std::string, QualifiedTarget> m_targetRegistry;
