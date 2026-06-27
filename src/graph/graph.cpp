@@ -438,8 +438,6 @@ Graph::resolveTargetSources(const Target &target,
       if (c.starts_with("./"))
         c = c.substr(2);
 
-      // Constructing fs::path directly from the base and our sliced string_view
-      // slice
       fs::path p = fs::path(b) / std::string(c);
       if (fs::exists(p) && fs::is_regular_file(p))
         res.push_back(p.lexically_normal().string());

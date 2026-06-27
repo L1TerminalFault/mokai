@@ -200,6 +200,7 @@ Config::extractProjectData(GlobalOptions &ops) {
   metadata.description = projectTable["description"].value_or("");
   metadata.homepage = projectTable["homepage"].value_or("");
   metadata.default_target = projectTable["default_target"].value_or("");
+  ops.default_compiler = projectTable["default_compiler"].value_or("");
 
   if (ops.default_compiler.empty()) {
     ops.default_compiler = projectTable["default_compiler"].value_or("");
