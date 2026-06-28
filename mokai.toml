@@ -17,7 +17,7 @@ sources = [
 
 [target.mokai]
 type = "executable"
-sources = ["src/entery.cpp"]
+sources = ["src/entry.cpp"]
 depends_on = ["MOKAI"]
 
 [target.mokai_tests]

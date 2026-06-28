@@ -1,6 +1,6 @@
 #include "graph.hpp"
 #include "cli/cli.hpp"
-#include "graph/compiler/ToolChainFinder.hpp"
+#include "graph/compiler/tool_chain_finder.hpp"
 #include "graph/types.hpp"
 #include <algorithm>
 #include <array>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Icompiler.hpp"
+#include "icompiler.hpp"
 #include "cli/cli.hpp"
 #include <format>
 #include <utility>
@@ -32,8 +32,10 @@ public:
   }
 
   std::string standardFlag(std::string_view version, bool is_c) const override {
-    return std::format("/std:{}{}", is_c ? "c" : "c++", version);
+    return std::format("/std:{}", version);
   }
+
+  std::string getObjExtension() const override { return ".obj"; }
 
   std::string optimizationFlag(BuildProfile build_type) const override {
     switch (build_type) {

@@ -175,6 +175,7 @@ struct ProjectMetadata {
   std::string homepage;
 
   std::string cpp_version;
+  std::string c_version;
 
   // FIXED CORE GAP: Allows a package to state which target to fall back to when
   // depended on generally

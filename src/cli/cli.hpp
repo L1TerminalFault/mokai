@@ -12,7 +12,7 @@
 #include <variant>
 #include <vector>
 
-inline constexpr std::string_view MOKAI_VERSION = "v0.0.5a";
+inline constexpr std::string_view MOKAI_VERSION = "v0.0.6a";
 
 namespace mokai {
 
@@ -83,7 +83,7 @@ struct CommandInfo {
 
 class Cli {
 public:
-  Cli();
+  Cli() = default;
   ~Cli() = default;
   std::expected<std::monostate, CliError> ParseCliArgs(int argc, char *argv[]);
   int Run(int argc, char *argv[]);

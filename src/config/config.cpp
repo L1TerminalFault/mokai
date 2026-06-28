@@ -213,14 +213,24 @@ Config::extractProjectData(GlobalOptions &ops) {
     metadata.version_from = std::move(vf);
   }
 
+  // extract cpp version
   auto cppversion = projectTable["cpp_version"].value<std::string>();
   static const std::vector<std::string> known_versions{
-      "c99", "c++11", "c++14", "c++17", "c++20", "c++23", "c++26"};
-  metadata.cpp_version = cppversion.value_or("c++23");
-
+      "c++11", "c++14", "c++17", "c++20", "c++23", "c++26"};
+  metadata.cpp_version = cppversion.value_or("c++23"); // default to 23
   if (!std::ranges::contains(known_versions, metadata.cpp_version)) {
     return std::unexpected("Validation Error: Unrecognized C++ standard: \"" +
                            metadata.cpp_version + "\"");
+  }
+  // extract c version
+  static const std::vector<std::string> known_c_versions{"c89", "c90", "c99",
+                                                         "c11", "c17", "c23"};
+
+  auto cversion = projectTable["c_version"].value<std::string>();
+  metadata.c_version = cversion.value_or("c11"); // default to 11
+  if (!std::ranges::contains(known_c_versions, metadata.c_version)) {
+    return std::unexpected("Validation Error: Unrecognized C standard: \"" +
+                           metadata.c_version + "\"");
   }
 
   extract_string_array(projectTable["authors"], metadata.authors);

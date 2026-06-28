@@ -1,15 +1,17 @@
 #pragma once
-#include "Icompiler.hpp"
+
 #include "cli/cli.hpp"
+#include "icompiler.hpp"
 #include <format>
-#include <string_view>
+#include <utility>
 
 namespace mokai {
-class ClangCompiler : public ICompiler {
+
+class GccCompiler : public ICompiler {
 public:
-  ClangCompiler(std::string c_path, std::string cpp_path, std::string ar_path)
-      : m_c_path(std::move(c_path)), m_ar_path(std::move(ar_path)),
-        m_cpp_path(std::move(cpp_path)) {};
+  GccCompiler(std::string c_path, std::string cpp_path, std::string ar_path)
+      : m_c_path(std::move(c_path)), m_cpp_path(std::move(cpp_path)),
+        m_ar_path(std::move(ar_path)) {}
 
   std::string getCompilerBinary(bool is_c) const override {
     return is_c ? m_c_path : m_cpp_path;
@@ -29,21 +31,22 @@ public:
     return std::format("-o \"{}\"", obj_path);
   }
 
-  // -std=c11 or -std=c++23
   std::string standardFlag(std::string_view version, bool is_c) const override {
-    return std::format("-std={}{}", is_c ? "c" : "c++", version);
+    return std::format("-std={}", version);
   }
+
+  std::string getObjExtension() const override { return ".o"; }
 
   std::string optimizationFlag(BuildProfile build_type) const override {
     switch (build_type) {
     case BuildProfile::DEBUG:
-      return "-g";
+      return "-O0";
     case BuildProfile::RELEASE:
       return "-O3";
     case BuildProfile::MINSIZEREL:
       return "-Os";
     }
-    return "-O2"; // fallback
+    return "-O2";
   }
 
   std::string compileOnlyFlag() const override { return "-c"; }
@@ -56,11 +59,12 @@ public:
 
   std::string verboseFlag() const override { return "-v"; }
 
-  CompilerType getType() const override { return CompilerType::CLANG; }
+  CompilerType getType() const override { return CompilerType::GCC; }
 
 private:
   std::string m_c_path;
   std::string m_cpp_path;
   std::string m_ar_path;
 };
+
 } // namespace mokai

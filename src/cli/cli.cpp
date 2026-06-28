@@ -3,6 +3,7 @@
 #include "core/os.hpp"
 #include "graph/graph.hpp"
 #include "log/log.h"
+#include "telemetry/log.hpp"
 #include "templates/template.hpp"
 #include <algorithm>
 #include <cctype>
@@ -80,24 +81,14 @@ static std::string findClosestManifestMatch(const fs::path &dir) {
   return closest_match;
 }
 
-// Generates a beautiful hint string
 static std::string formatHint(const std::string &hint_text) {
   return "\n\n  \033[36m💡 Hint:\033[0m " + hint_text;
 }
 
 } // namespace dx
 
-// ============================================================================
-// Core CLI Implementation
-// ============================================================================
-
-Cli::Cli() {
-  log::Logger log;
-  m_logger = log;
-  m_logger.SetPrefix("mokai");
-}
-
 void Cli::initCommands() {
+  mokai::PerfScope init_probe("CLI: Initialize Command Dispatch Map");
   m_supported_commands["build"] = {
       "mokai build [path]",
       "Compiles all dependencies and targets matching structural graph rules.",
@@ -140,20 +131,18 @@ void Cli::initCommands() {
 }
 
 int Cli::Run(int argc, char *argv[]) {
+  mokai::PerfScope run_probe("CLI: Argument Parsing & Routing");
   initCommands();
   if (argc == 1) {
-    std::println(std::cerr, " {}{} {}{}", Style::Green, "◆ mokai", Style::Dim,
-                 MOKAI_VERSION);
-    std::println(std::cerr,
-                 "  {}Run {}mokai --help [command]{} to learn more.\n",
-                 Style::Dim, Style::Reset, Style::Dim);
-    std::println(std::cerr, "{}Available commands:{}", Style::Bold,
-                 Style::Reset);
+    std::println("mokai v{}", MOKAI_VERSION);
+    std::println("Usage: mokai <command> [args...]\n");
+    std::println("Commands:");
     logSupportedCommands();
     return static_cast<int>(ExitCode::UsageError);
   }
 
   auto result = ParseCliArgs(argc, argv);
+
   if (!result.has_value()) {
     m_logger.Error(result.error().message);
 
@@ -176,6 +165,8 @@ int Cli::Run(int argc, char *argv[]) {
 
 std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
                                                           char *argv[]) {
+  mokai::PerfTimer timer;
+
   std::vector<std::string> rawArgs;
   rawArgs.reserve(argc - 1);
   for (int i = 1; i < argc; ++i) {
@@ -185,6 +176,7 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
   std::string command = "";
   std::vector<std::string> subCommandArgs;
 
+  // --- PHASE 1: Argument Parsing ---
   for (size_t i = 0; i < rawArgs.size(); ++i) {
     const auto &arg = rawArgs[i];
 
@@ -235,6 +227,7 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
       }
     }
   }
+  timer.Mark("CLI: Parsing Phase");
 
   if (m_options.verbosity == Verbosity::Quiet) {
     m_logger.SetLevel(log::Level::Error);
@@ -248,12 +241,15 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
                                     "action target path definition context"});
   }
 
+  // --- PHASE 2: Command Dispatch ---
   if (auto cmdToDispatch = m_supported_commands.find(command);
       cmdToDispatch != m_supported_commands.end()) {
-    return cmdToDispatch->second.callback(subCommandArgs);
+    auto result = cmdToDispatch->second.callback(subCommandArgs);
+    timer.Mark("CLI: Dispatch Execution");
+    return result;
   }
 
-  // --- SMART COMMAND TYPO HINT ---
+  // --- PHASE 3: Smart Command Typo Hint ---
   std::string err = "Unknown command issued: '\033[1m" + command + "\033[0m'";
   size_t min_dist = 3;
   std::string closest_cmd;
@@ -268,6 +264,7 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
     err += dx::formatHint("Did you mean '\033[1mmokai " + closest_cmd +
                           "\033[0m'?");
   }
+  timer.Mark("CLI: Typo Resolution");
 
   return std::unexpected(CliError{CliError::Code::UnknownCommand, err});
 }

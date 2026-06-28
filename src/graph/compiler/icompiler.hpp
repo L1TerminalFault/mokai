@@ -24,6 +24,7 @@ public:
 
   virtual std::string compileOnlyFlag() const = 0;
   virtual std::string positionIndependentCodeFlag() const = 0;
+  virtual std::string getObjExtension() const = 0;
   virtual std::string formatArchiveCommand(std::string_view out_lib) const = 0;
   virtual std::string verboseFlag() const = 0;
 

@@ -1,7 +1,9 @@
 #include "graph.hpp"
+#include "telemetry/log.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <print>
@@ -17,24 +19,9 @@ namespace mokai {
 
 class Graph::BuildPipeline {
 private:
-  struct ThreadState {
-    bool active{false};
-    std::string current_file{""};
-    std::chrono::steady_clock::time_point start_time;
-  };
-  int m_frame = 0;
-  int m_anim_step{0};
-
   std::atomic<int> m_total_compile_tasks{0};
-
-  std::mutex m_progress_mutex;
-  std::vector<ThreadState> m_thread_states;
-  unsigned int m_num_threads{0};
-  bool m_terminal_initialized{false};
-
-  // Dedicated UI manager to completely eliminate thread-tearing waterfall bugs
-  std::thread m_ui_thread;
-  std::atomic<bool> m_ui_running{false};
+  std::mutex m_log_mutex; // Replaces progress_mutex, used purely for
+                          // thread-safe terminal printing
 
 public:
   struct Task {
@@ -55,160 +42,6 @@ public:
     std::vector<BuildRecord> records;
     std::vector<std::string> object_files;
   };
-
-  void initTerminalLayout() {
-    if (m_terminal_initialized)
-      return;
-    m_num_threads = std::thread::hardware_concurrency();
-    m_thread_states.resize(m_num_threads);
-
-    // Allocate vertical visual lines cleanly ahead of time so the jumps don't
-    // scroll past the top viewport
-    int total_lines = m_num_threads + 12;
-    for (int i = 0; i < total_lines; ++i) {
-      std::println("");
-    }
-    m_terminal_initialized = true;
-  }
-  void bootSequence() {
-    std::string boot_text = "INITIALIZING_MOKAI_CORE...";
-    for (char c : boot_text) {
-      std::print("\033[1;32m{}\033[0m", c);
-      std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    }
-    std::print("\n");
-  }
-
-  void drawPipelineDashboard() {
-    std::lock_guard<std::mutex> lock(m_progress_mutex);
-    m_frame++;
-
-    constexpr const char *kFace = "(>w<)";
-    constexpr int kWidth = 80;
-    constexpr int kBarWidth = 30;
-
-    auto visibleLen = [](const std::string &s) {
-      int len = 0;
-      for (unsigned char c : s) {
-        if ((c & 0xC0) != 0x80)
-          ++len;
-      }
-      return len;
-    };
-
-    auto repeatUtf8 = [](const std::string &unit, int n) {
-      std::string out;
-      out.reserve(unit.size() * static_cast<size_t>(n));
-      for (int i = 0; i < n; ++i)
-        out += unit;
-      return out;
-    };
-
-    // Pad PLAIN text to kWidth visible columns — always pad before wrapping
-    // in ANSI color codes, since escape bytes would otherwise get counted
-    // as visible characters and throw the math off.
-    auto padRow = [&](const std::string &text) {
-      int pad = kWidth - visibleLen(text);
-      if (pad < 0)
-        pad = 0;
-      return text + std::string(static_cast<size_t>(pad), ' ');
-    };
-
-    // \033[K on every line: clears any stale character left over from a
-    // previous, longer frame at this exact row — this is what fixes the
-    // misalignment, not the padding logic itself.
-    auto printRow = [&](const std::string &colorCode, const std::string &text) {
-      std::print("\033[1;36m  ┃{}{}\033[1;36m┃\033[0m\033[K\n", colorCode,
-                 padRow(text));
-    };
-
-    std::string top = "┏" + repeatUtf8("━", kWidth) + "┓";
-    std::string mid = "┣" + repeatUtf8("━", kWidth) + "┫";
-    std::string bot = "┗" + repeatUtf8("━", kWidth) + "┛";
-
-    int total = m_total_compile_tasks.load();
-    int done = m_completed_tasks.load();
-    if (total <= 0)
-      total = 1;
-    if (done > total)
-      done = total;
-    int pct = (done * 100) / total;
-    int filled = (done * kBarWidth) / total;
-
-    std::string bar = "[" + repeatUtf8("█", filled) +
-                      repeatUtf8("░", kBarWidth - filled) + "]";
-    std::string progress_text = bar + " " + std::to_string(pct) + "%  (" +
-                                std::to_string(done) + "/" +
-                                std::to_string(total) + " files)";
-
-    // Collect active filenames, but describe them properly: a count up front,
-    // and a graceful "+N more" cutoff instead of chopping a filename in half.
-    std::vector<std::string> active_files;
-    for (unsigned int i = 0; i < m_num_threads; ++i) {
-      if (m_thread_states[i].active) {
-        active_files.push_back(
-            fs::path(m_thread_states[i].current_file).filename().string());
-      }
-    }
-
-    std::string active_text;
-    if (active_files.empty()) {
-      active_text = "\u25B8 " +
-                    std::string(done >= total ? "linking final artifacts..."
-                                              : "warming up compile queue...");
-    } else {
-      active_text = "\u25B8 compiling " + std::to_string(active_files.size()) +
-                    (active_files.size() == 1 ? " file: " : " files: ");
-      std::string list;
-      size_t shown = 0;
-      for (; shown < active_files.size(); ++shown) {
-        std::string next = (shown > 0 ? ", " : "") + active_files[shown];
-        if (visibleLen(active_text) + visibleLen(list) + visibleLen(next) >
-            kWidth - 1) {
-          break;
-        }
-        list += next;
-      }
-      active_text += list;
-      if (shown < active_files.size()) {
-        active_text +=
-            " +" + std::to_string(active_files.size() - shown) + " more";
-      }
-    }
-
-    std::print("\033[H");
-    std::print("\033[1;36m  {}\033[0m\033[K\n", top);
-    printRow("\033[1;35m", " MOKAI BUILD  " + std::string(kFace));
-    std::print("\033[1;36m  {}\033[0m\033[K\n", mid);
-    printRow("\033[1;32m", " " + progress_text);
-    printRow("\033[1;33m", " " + active_text);
-    std::print("\033[1;36m  {}\033[0m\033[K\n", bot);
-    std::print(
-        "\033[J"); // clear any leftover lines below a previously taller frame
-    std::fflush(stdout);
-  }
-
-  void startUiLoop() {
-    m_ui_running = true;
-    m_ui_thread = std::thread([this]() {
-      while (m_ui_running) {
-        drawPipelineDashboard();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      }
-    });
-  }
-
-  void stopUiLoop() {
-    if (m_ui_running) {
-      m_ui_running = false;
-      if (m_ui_thread.joinable()) {
-        m_ui_thread.join();
-      }
-      // Trigger one ultimate complete rendering frame update to lock the UI
-      // structure clean
-      drawPipelineDashboard();
-    }
-  }
 
   BuildPipeline(Graph &graph, const std::vector<std::string> &build_order)
       : m_graph(graph), m_order(build_order), m_failed(false), m_stop(false),
@@ -235,76 +68,85 @@ public:
     m_cache_path = "./.mokai/mokai.cache";
   }
 
-  ~BuildPipeline() {
-    stopUiLoop();
-    stopWorkers();
-  }
+  ~BuildPipeline() { stopWorkers(); }
 
   bool execute() {
     if (m_order.empty())
       return true;
     if (!m_graph.m_compiler)
       return false;
-    fs::create_directories(m_obj_dir);
-    fs::create_directories("./.mokai");
 
-    loadStateCache();
-    m_graph.executeHooks(m_graph.m_root_manifest, HookTrigger::PreBuild, "");
+    mokai::PerfTimer timer;
 
-    computeDirtyTargets();
+    {
+      fs::create_directories(m_obj_dir);
+      fs::create_directories("./.mokai");
+
+      loadStateCache();
+      m_graph.executeHooks(m_graph.m_root_manifest, HookTrigger::PreBuild, "");
+
+      computeDirtyTargets();
+    }
+    timer.Mark("Pipeline: Initialization & Dirty Calc");
+
     if (!m_needs_any_work && !m_graph.m_options.force_rebuild) {
       if (m_graph.m_options.verbosity != Verbosity::Quiet) {
-        m_graph.m_logger.Success(
-            "Build system synchronization complete: zero units dirty.");
+        std::print("\033[32m[ INFO  ]\033[0m Build system synchronized: zero "
+                   "units dirty.\n");
       }
       return true;
     }
 
-    buildLocalDependencyGraph();
-
-    for (const auto &qn : m_order) {
-      if (m_in_degree[qn] == 0) {
-        m_ready_queue.push(qn);
+    {
+      buildLocalDependencyGraph();
+      for (const auto &qn : m_order) {
+        if (m_in_degree[qn] == 0) {
+          m_ready_queue.push(qn);
+        }
       }
     }
+    timer.Mark("Pipeline: Graph Setup");
 
-    initTerminalLayout();
-    startUiLoop();
+    {
+      std::print("\033[32m[ INFO  ]\033[0m Dispatching build pipeline...\n");
 
-    std::unique_lock<std::mutex> lock(m_state_mutex);
-    while (m_finished_targets < m_total_targets && !m_failed) {
-      processReadyTargets();
+      std::unique_lock<std::mutex> lock(m_state_mutex);
+      while (m_finished_targets < m_total_targets && !m_failed) {
+        processReadyTargets();
 
-      if (m_finished_targets >= m_total_targets || m_failed) {
-        break;
+        if (m_finished_targets >= m_total_targets || m_failed) {
+          break;
+        }
+
+        m_cv.wait(lock, [this]() {
+          return m_failed || m_completed_tasks > m_processed_tasks;
+        });
+        m_processed_tasks = m_completed_tasks;
+
+        reapCompletedTargets();
       }
-
-      m_cv.wait(lock, [this]() {
-        return m_failed || m_completed_tasks > m_processed_tasks;
-      });
-      m_processed_tasks = m_completed_tasks;
-
-      reapCompletedTargets();
     }
-    lock.unlock();
-
-    stopUiLoop();
+    timer.Mark("Pipeline: Mainloop (compile + link wait)");
     stopWorkers();
+    timer.Mark("Pipeline: Worker Execution Loop");
 
     if (m_failed) {
-      std::println("\n\033[1;31m [!] BUILD FAILED ── compiler exited non-zero, "
-                   "nothing crashed though (-_-;)\033[0m");
+      std::print("\033[31m[ ERROR ]\033[0m Build pipeline failed: Compiler "
+                 "exited non-zero.\n");
       return false;
     }
+
     if (m_total_compile_tasks.load() > 0) {
-      std::println("\n\033[1;32m ── ALL TARGETS LINKED ── {} files compiled "
-                   "clean ヽ(•‿•)ノ\033[0m",
-                   m_total_compile_tasks.load());
+      std::print("\033[32m[ INFO  ]\033[0m All targets linked. {} files "
+                 "compiled cleanly.\n",
+                 m_total_compile_tasks.load());
     }
 
     saveStateCache();
     m_graph.executeHooks(m_graph.m_root_manifest, HookTrigger::PostBuild, "");
     emitCompileCommands();
+
+    timer.Mark("Pipeline: Post-build Finalization");
 
     return true;
   }
@@ -396,7 +238,7 @@ private:
   void spawnWorkers() {
     unsigned int threads = std::thread::hardware_concurrency();
     for (unsigned int i = 0; i < threads; ++i) {
-      m_workers.emplace_back([this, i]() {
+      m_workers.emplace_back([this]() {
         while (true) {
           std::pair<std::shared_ptr<TargetContext>, Task> item;
           {
@@ -414,10 +256,9 @@ private:
           auto &task = item.second;
 
           {
-            std::lock_guard<std::mutex> state_lock(m_progress_mutex);
-            m_thread_states[i].current_file = task.source;
-            m_thread_states[i].start_time = std::chrono::steady_clock::now();
-            m_thread_states[i].active = true;
+            std::lock_guard<std::mutex> lock(m_log_mutex);
+            std::print("\033[0m[ BUILD ]\033[0m Compiling {}\n",
+                       fs::path(task.source).filename().string());
           }
 
           std::vector<std::string> args = {
@@ -450,11 +291,6 @@ private:
 
           ctx->remaining_tasks--;
           m_completed_tasks++;
-
-          {
-            std::lock_guard<std::mutex> state_lock(m_progress_mutex);
-            m_thread_states[i].active = false;
-          }
 
           m_cv.notify_one();
         }
@@ -610,13 +446,17 @@ private:
         std::lock_guard<std::mutex> lock(m_queue_mutex);
         for (size_t i = 0; i < m_graph.m_resolvedSourcesCache[cr].size(); ++i) {
           std::string s = m_graph.m_resolvedSourcesCache[cr][i];
-          std::string ext =
-              (m_graph.m_compiler->getType() == CompilerType::MSVC) ? ".obj"
-                                                                    : ".o";
-          std::string o = (fs::path(m_obj_dir) / qt->target.name /
-                           (fs::path(s).filename().string() + "_" +
-                            std::to_string(std::hash<std::string>{}(s)) + ext))
-                              .string();
+          std::string ext = m_graph.m_compiler->getObjExtension(); // .o or .obj
+          std::string flattened = fs::relative(s, m_working_dir).string();
+          // replace with _
+          for (char &c : flattened) {
+            if (c == '/' || c == '\\' || c == ' ' || c == ':')
+              c = '_';
+          }
+          std::string o =
+              (fs::path(m_obj_dir) / qt->target.name / (flattened + ext))
+                  .string();
+
           ctx->object_files[i] = o;
 
           if (m_graph.m_options.force_rebuild || !m_state_cache.count(s) ||
@@ -634,8 +474,10 @@ private:
             m_total_compile_tasks++;
 
             bool is_c = fs::path(s).extension() == ".c";
-            std::string std_flag =
-                m_graph.m_compiler->standardFlag(is_c ? "11" : "23", is_c);
+            std::string std_flag = m_graph.m_compiler->standardFlag(
+                is_c ? qt->manifest->project.c_version
+                     : qt->manifest->project.cpp_version,
+                is_c);
 
             m_task_queue.push(
                 {ctx, {s, o, is_c, std_flag, m_working_dir, b_args}});
@@ -694,6 +536,13 @@ private:
           lk_args.push_back("-l" + s);
       }
     }
+
+    {
+      std::lock_guard<std::mutex> lock(m_log_mutex);
+      std::print("\033[36m[ LINK  ]\033[0m {}\n",
+                 fs::path(out_file).filename().string());
+    }
+
     return m_graph.executeCommandFast(lk_args) == 0;
   }
 
@@ -796,12 +645,10 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
   }
 
   if (m_options.verbosity != Verbosity::Quiet) {
-    std::lock_guard<std::mutex> log_lock(g_log_mutex);
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::high_resolution_clock::now() - start_time)
                         .count();
-    m_logger.Success("Build execution complete in " + std::to_string(duration) +
-                     "ms.");
+    std::print("\033[32m[ INFO  ]\033[0m Build complete in {} ms.\n", duration);
   }
   return true;
 }

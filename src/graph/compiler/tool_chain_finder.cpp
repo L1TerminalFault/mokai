@@ -1,8 +1,8 @@
-#include "ToolChainFinder.hpp"
-#include "ClangCompiler.hpp"
-#include "GccCompiler.hpp"
-#include "MsvcCompiler.hpp"
+#include "tool_chain_finder.hpp"
+#include "clang_compiler.hpp"
+#include "gcc_compiler.hpp"
 #include "log/log.h"
+#include "msvc_compiler.hpp"
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -292,17 +292,18 @@ ToolchainFinder::discover(const std::string &user_pref) {
 
   if (available_toolchains > 1) {
     std::string msg = "Multiple toolchains found on PATH (";
-    if (!clang_cpp.empty())
-      msg += "Clang, ";
     if (!gcc_cpp.empty())
       msg += "GCC, ";
+    if (!clang_cpp.empty())
+      msg += "Clang, ";
     if (!cl_bin.empty())
       msg += "MSVC, ";
     if (msg.ends_with(", "))
       msg.resize(msg.size() - 2);
 
-    // our default ranking strategy Clang > GCC > MSVC
-    std::string choice = !clang_cpp.empty() ? "clang++" : "g++";
+    // new default ranking strategy GCC > Clang > MSVC
+    std::string choice =
+        !gcc_cpp.empty() ? "g++" : (!clang_cpp.empty() ? "clang++" : "cl");
     msg += "). Defaulting to " + choice +
            ". Set [project] default_compiler to override.";
     m_logger.Warn(msg);
