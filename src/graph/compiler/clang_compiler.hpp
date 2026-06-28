@@ -4,6 +4,7 @@
 #include <format>
 #include <string_view>
 
+namespace fs = std::filesystem;
 namespace mokai {
 class ClangCompiler : public ICompiler {
 public:
@@ -29,6 +30,11 @@ public:
     return std::format("-o \"{}\"", obj_path);
   }
 
+  std::vector<std::string>
+  dependencyFlags(const std::string &obj) const override {
+    std::string depFile = fs::path(obj).replace_extension(".d").string();
+    return {"-MMD", "-MF", depFile};
+  }
   // -std=c11 or -std=c++23
   std::string standardFlag(std::string_view version, bool is_c) const override {
     return std::format("-std={}", version);

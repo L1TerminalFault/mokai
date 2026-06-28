@@ -1,7 +1,7 @@
 #pragma once
 
-#include "icompiler.hpp"
 #include "cli/cli.hpp"
+#include "icompiler.hpp"
 #include <format>
 #include <utility>
 
@@ -29,6 +29,11 @@ public:
 
   std::string formatOutput(std::string_view obj_path) const override {
     return std::format("/Fo\"{}\"", obj_path);
+  }
+
+  std::vector<std::string>
+  dependencyFlags(const std::string &obj) const override {
+    return {"/showIncludes"};
   }
 
   std::string standardFlag(std::string_view version, bool is_c) const override {

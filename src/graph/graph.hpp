@@ -105,6 +105,10 @@ private:
   class BuildPipeline;
 
   int executeCommandFast(const std::vector<std::string> &args);
+
+  int executeCommandFast(const std::vector<std::string> &args,
+                         const std::string &redirectStdoutTo);
+
   std::string
   getNormalizedFileTimestamp(const std::filesystem::path &path) const;
 

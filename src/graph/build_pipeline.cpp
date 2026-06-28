@@ -1,8 +1,10 @@
 #include "graph.hpp"
+#include "graph/compiler/icompiler.hpp"
 #include "telemetry/log.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -20,8 +22,7 @@ namespace mokai {
 class Graph::BuildPipeline {
 private:
   std::atomic<int> m_total_compile_tasks{0};
-  std::mutex m_log_mutex; // Replaces progress_mutex, used purely for
-                          // thread-safe terminal printing
+  std::mutex m_log_mutex;
 
 public:
   struct Task {
@@ -122,7 +123,6 @@ public:
           return m_failed || m_completed_tasks > m_processed_tasks;
         });
         m_processed_tasks = m_completed_tasks;
-
         reapCompletedTargets();
       }
     }
@@ -240,6 +240,7 @@ private:
     for (unsigned int i = 0; i < threads; ++i) {
       m_workers.emplace_back([this]() {
         while (true) {
+
           std::pair<std::shared_ptr<TargetContext>, Task> item;
           {
             std::unique_lock<std::mutex> lock(m_queue_mutex);
@@ -260,7 +261,16 @@ private:
             std::print("\033[0m[ BUILD ]\033[0m Compiling {}\n",
                        fs::path(task.source).filename().string());
           }
-
+          if (!task.build_args) {
+            std::lock_guard<std::mutex> lock(m_log_mutex);
+            std::print("\033[31m[ ERROR ]\033[0m Task {} has null build "
+                       "arguments! Skipping.\n",
+                       task.source);
+            ctx->failed = true;
+            m_failed = true;
+            m_cv.notify_one();
+            continue;
+          }
           std::vector<std::string> args = {
               m_graph.m_compiler->getCompilerBinary(task.is_c)};
           args.push_back(m_graph.m_compiler->compileOnlyFlag());
@@ -273,20 +283,38 @@ private:
           } else {
             args.push_back(formatted);
           }
+          for (const auto &f :
+               m_graph.m_compiler->dependencyFlags(task.output)) {
+            args.push_back(f);
+          }
 
           args.push_back(task.std_flag);
           for (const auto &arg : *task.build_args) {
             args.push_back(arg);
           }
-
-          if (m_graph.executeCommandFast(args) != 0) {
-            ctx->failed = true;
-            m_failed = true;
+          if (0 && m_graph.m_compiler->getType() == CompilerType::MSVC) {
+            if (m_graph.executeCommandFast(
+                    args,
+                    fs::path(task.output).replace_extension(".d").string()) !=
+                0) {
+              ctx->failed = true;
+              m_failed = true;
+            } else {
+              std::lock_guard<std::mutex> record_lock(ctx->record_mutex);
+              ctx->records.push_back(
+                  {task.source, m_graph.getNormalizedFileTimestamp(task.source),
+                   "-"});
+            }
           } else {
-            std::lock_guard<std::mutex> record_lock(ctx->record_mutex);
-            ctx->records.push_back(
-                {task.source, m_graph.getNormalizedFileTimestamp(task.source),
-                 "-"});
+            if (m_graph.executeCommandFast(args) != 0) {
+              ctx->failed = true;
+              m_failed = true;
+            } else {
+              std::lock_guard<std::mutex> record_lock(ctx->record_mutex);
+              ctx->records.push_back(
+                  {task.source, m_graph.getNormalizedFileTimestamp(task.source),
+                   "-"});
+            }
           }
 
           ctx->remaining_tasks--;

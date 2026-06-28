@@ -29,35 +29,79 @@ extern char **environ;
 namespace fs = std::filesystem;
 
 namespace mokai {
-
 int Graph::executeCommandFast(const std::vector<std::string> &args) {
+  return executeCommandFast(args, "");
+}
+
+int Graph::executeCommandFast(const std::vector<std::string> &args,
+                              const std::string &redirectStdoutTo) {
   if (args.empty())
     return -1;
 #ifdef _WIN32
-  std::string cmdLine = "";
+  std::string cmdLine;
+  bool pipestdout = false;
   for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == "/showIncludes") {
+      pipestdout = true;
+    }
     cmdLine += (i > 0 ? " \"" : "\"") + args[i] + "\"";
   }
 
+  // Pipe handles
+  HANDLE hRead = nullptr, hWrite = nullptr;
+  SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
   STARTUPINFOA si;
   PROCESS_INFORMATION pi;
   SecureZeroMemory(&si, sizeof(si));
-  si.cb = sizeof(si);
   SecureZeroMemory(&pi, sizeof(pi));
+  si.cb = sizeof(si);
+
+  if (pipestdout) {
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+      return -1;
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  }
 
   if (!CreateProcessA(nullptr, &cmdLine[0], nullptr, nullptr, TRUE, 0, nullptr,
                       nullptr, &si, &pi)) {
+    if (hRead)
+      CloseHandle(hRead);
+    if (hWrite)
+      CloseHandle(hWrite);
     return -1;
   }
 
+  if (pipestdout)
+    CloseHandle(hWrite);
+
+  // Wait for process
   WaitForSingleObject(pi.hProcess, INFINITE);
   DWORD exitCode = 0;
   GetExitCodeProcess(pi.hProcess, &exitCode);
 
+  // Capture stdout if requested
+  if (pipestdout && !redirectStdoutTo.empty()) {
+    std::ofstream outFile(redirectStdoutTo);
+    char buffer[4096];
+    DWORD bytesRead;
+    while (ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, nullptr)) {
+      if (bytesRead == 0)
+        break;
+      buffer[bytesRead] = '\0';
+      outFile << buffer;
+    }
+    CloseHandle(hRead);
+  }
+
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
-  return static_cast<int>(exitCode);
 
+  return static_cast<int>(exitCode);
 #else
   std::vector<char *> argv;
   argv.reserve(args.size() + 1);

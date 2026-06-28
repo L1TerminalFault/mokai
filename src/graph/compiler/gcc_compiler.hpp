@@ -5,8 +5,8 @@
 #include <format>
 #include <utility>
 
+namespace fs = std::filesystem;
 namespace mokai {
-
 class GccCompiler : public ICompiler {
 public:
   GccCompiler(std::string c_path, std::string cpp_path, std::string ar_path)
@@ -25,6 +25,12 @@ public:
 
   std::string formatDefine(std::string_view def) const override {
     return std::format("-D{}", def);
+  }
+
+  std::vector<std::string>
+  dependencyFlags(const std::string &obj) const override {
+    std::string depFile = fs::path(obj).replace_extension(".d").string();
+    return {"-MMD", "-MF", depFile};
   }
 
   std::string formatOutput(std::string_view obj_path) const override {
