@@ -30,12 +30,10 @@ namespace fs = std::filesystem;
 
 namespace mokai {
 
-// TODO: codereview , find better place
 int Graph::executeCommandFast(const std::vector<std::string> &args) {
   if (args.empty())
     return -1;
 #ifdef _WIN32
-  // flatten the arguments into a single raw command-line string layout
   std::string cmdLine = "";
   for (size_t i = 0; i < args.size(); ++i) {
     cmdLine += (i > 0 ? " \"" : "\"") + args[i] + "\"";
@@ -61,40 +59,30 @@ int Graph::executeCommandFast(const std::vector<std::string> &args) {
   return static_cast<int>(exitCode);
 
 #else
-  // POSIX Linux, macOS, BSD
   std::vector<char *> argv;
   argv.reserve(args.size() + 1);
   for (const auto &arg : args) {
     argv.push_back(const_cast<char *>(arg.c_str()));
   }
-  argv.push_back(
-      nullptr); // POSIX requires a trailing null pointer to terminate the array
+  argv.push_back(nullptr);
 
   pid_t pid = fork();
 
   if (pid < 0) {
-    // Forking failed entirely at the OS level
     return -1;
   } else if (pid == 0) {
-    // Execute the binary directly. This replaces the child process memory space
-    // with the compiler (gcc/clang)
     execvp(argv[0], argv.data());
-
-    // If execvp returns, it means the binary wasn't found or isn't executable
     _exit(127);
   } else {
     int status = 0;
     if (waitpid(pid, &status, 0) == -1) {
       return -1;
     }
-    // Explicit crash and signal handling verification
     if (WIFEXITED(status)) {
       return WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
-      // Child was abnormally terminated or crashed by a signal
       return -1;
     }
-
     return -1;
   }
 #endif
@@ -110,7 +98,6 @@ std::string Graph::escapeJsonString(const std::string &input) {
   return output;
 }
 
-// creator
 std::expected<Graph, std::string>
 Graph::Create(std::shared_ptr<ProjectManifest> rootManifest,
               const GlobalOptions &options) {
@@ -121,21 +108,99 @@ Graph::Create(std::shared_ptr<ProjectManifest> rootManifest,
   if (!result) {
     return std::unexpected(result.error());
   }
-
   return Graph(std::move(rootManifest), options, std::move(result.value()));
 }
 
-// constructor
 Graph::Graph(std::shared_ptr<ProjectManifest> rootManifest,
              const GlobalOptions &options, std::unique_ptr<ICompiler> compiler)
     : m_root_manifest(std::move(rootManifest)), m_options(options), m_logger(),
       m_conditionEngine(std::make_unique<ConditionEngine>()),
       m_compiler(std::move(compiler)) {
+  loadSourcesCache();
   populateRegistry(m_root_manifest, m_rootPrefix);
+  saveSourcesCache();
   m_edges = buildEdges();
 }
+
 std::string Graph::getCachePath() const {
   return (fs::path(".mokai") / "graph.bin").string();
+}
+
+std::string Graph::getSourcesCachePath() const {
+  return (fs::path(".mokai") / "sources.cache").string();
+}
+
+void Graph::loadSourcesCache() {
+  std::string src_cache = getSourcesCachePath();
+  if (!fs::exists(src_cache) || m_options.force_rebuild)
+    return;
+
+  std::ifstream file(src_cache, std::ios::binary);
+  if (!file.is_open())
+    return;
+
+  size_t total_targets = 0;
+  if (!(file.read(reinterpret_cast<char *>(&total_targets),
+                  sizeof(total_targets))))
+    return;
+
+  for (size_t i = 0; i < total_targets; ++i) {
+    size_t qn_len = 0;
+    file.read(reinterpret_cast<char *>(&qn_len), sizeof(qn_len));
+    std::string qn(qn_len, '\0');
+    file.read(&qn[0], qn_len);
+
+    size_t timestamp_len = 0;
+    file.read(reinterpret_cast<char *>(&timestamp_len), sizeof(timestamp_len));
+    std::string ts(timestamp_len, '\0');
+    file.read(&ts[0], timestamp_len);
+
+    size_t paths_count = 0;
+    file.read(reinterpret_cast<char *>(&paths_count), sizeof(paths_count));
+    std::vector<std::string> paths;
+    paths.reserve(paths_count);
+
+    for (size_t j = 0; j < paths_count; ++j) {
+      size_t path_len = 0;
+      file.read(reinterpret_cast<char *>(&path_len), sizeof(path_len));
+      std::string p(path_len, '\0');
+      file.read(&p[0], path_len);
+      paths.push_back(p);
+    }
+    m_diskSourcesCache[qn] = {ts, paths};
+  }
+}
+
+void Graph::saveSourcesCache() {
+  fs::create_directories("./.mokai");
+  std::ofstream file(getSourcesCachePath(), std::ios::binary);
+  if (!file.is_open())
+    return;
+
+  size_t total_targets = m_resolvedSourcesCache.size();
+  file.write(reinterpret_cast<const char *>(&total_targets),
+             sizeof(total_targets));
+
+  for (auto const &[qn, paths] : m_resolvedSourcesCache) {
+    size_t qn_len = qn.size();
+    file.write(reinterpret_cast<const char *>(&qn_len), sizeof(qn_len));
+    file.write(qn.data(), qn_len);
+
+    std::string ts = m_manifestTimestamps[m_targetManifestPaths[qn]];
+    size_t timestamp_len = ts.size();
+    file.write(reinterpret_cast<const char *>(&timestamp_len),
+               sizeof(timestamp_len));
+    file.write(ts.data(), timestamp_len);
+
+    size_t paths_count = paths.size();
+    file.write(reinterpret_cast<const char *>(&paths_count),
+               sizeof(paths_count));
+    for (const auto &p : paths) {
+      size_t path_len = p.size();
+      file.write(reinterpret_cast<const char *>(&path_len), sizeof(path_len));
+      file.write(p.data(), path_len);
+    }
+  }
 }
 
 void Graph::populateRegistry(std::shared_ptr<ProjectManifest> manifest,
@@ -145,12 +210,13 @@ void Graph::populateRegistry(std::shared_ptr<ProjectManifest> manifest,
   m_processedManifests.insert(manifest.get());
 
   fs::path tomlPath = fs::path(manifest->base_dir) / "mokai.toml";
+  std::string tomlPathStr = tomlPath.string();
   if (fs::exists(tomlPath)) {
     auto ftime = fs::last_write_time(tomlPath);
     auto duration = ftime.time_since_epoch();
     auto millis =
         std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-    m_manifestTimestamps[tomlPath.string()] = std::to_string(millis);
+    m_manifestTimestamps[tomlPathStr] = std::to_string(millis);
   }
 
   for (auto &target : manifest->targets) {
@@ -164,14 +230,26 @@ void Graph::populateRegistry(std::shared_ptr<ProjectManifest> manifest,
     }
 
     m_targetRegistry[qn] = {qn, target, manifest};
+    m_targetManifestPaths[qn] = tomlPathStr;
 
     if (!m_resolvedSourcesCache.count(qn)) {
-      try {
-        m_resolvedSourcesCache[qn] = resolveTargetSources(target, manifest);
-      } catch (const std::exception &e) {
-        m_logger.Error("Failed to resolve target file components for '" + qn +
-                       "': " + e.what());
-        continue;
+      bool cache_hit = false;
+      if (m_diskSourcesCache.count(qn)) {
+        const auto &[cached_mtime, cached_paths] = m_diskSourcesCache[qn];
+        if (cached_mtime == m_manifestTimestamps[tomlPathStr]) {
+          m_resolvedSourcesCache[qn] = cached_paths;
+          cache_hit = true;
+        }
+      }
+
+      if (!cache_hit) {
+        try {
+          m_resolvedSourcesCache[qn] = resolveTargetSources(target, manifest);
+        } catch (const std::exception &e) {
+          m_logger.Error("Failed to resolve target file components for '" + qn +
+                         "': " + e.what());
+          continue;
+        }
       }
     }
   }
@@ -190,14 +268,11 @@ std::string Graph::generateQualifiedName(const std::string_view prefix,
   if (prefix.empty()) {
     return std::string(name);
   }
-
   std::string result;
   result.reserve(prefix.size() + m_packageSeparator.size() + name.size());
-
   result.append(prefix);
   result.append(m_packageSeparator);
   result.append(name);
-
   return result;
 }
 
@@ -228,7 +303,6 @@ std::vector<GraphEdge> Graph::buildEdges() {
                          to_name + "'");
           continue;
         }
-
         seen_dependencies.insert(to_name);
         edges.push_back({qn, to_name});
       }
@@ -245,10 +319,8 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
   auto get_manifest_prefix =
       [&](const ProjectManifest *manifest) -> std::string_view {
     if (manifest == m_root_manifest.get()) {
-      return m_rootPrefix; // Fixed: Match what populateRegistry used
+      return m_rootPrefix;
     }
-
-    // Fallback structural scan if it's a sub-dependency manifest
     for (const auto &[qn, qt] : m_targetRegistry) {
       if (qt.manifest.get() == manifest) {
         size_t dot = qn.find('.');
@@ -284,7 +356,6 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
         }
       }
     }
-
     if (resolved.empty()) {
       m_logger.Warn("Explicit dependency link reference '" + raw_dep +
                     "' could not be mapped to any targets inside '" +
@@ -304,7 +375,6 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
     if ((key == raw_dep ||
          (rd.manifest && rd.manifest->project.name == raw_dep)) &&
         rd.manifest && rd.manifest->exports) {
-
       for (const auto &def_tgt : rd.manifest->exports->default_targets) {
         std::string found = find_in_manifest_fast(rd.manifest, def_tgt);
         if (!found.empty() && !unique_targets.contains(found)) {
@@ -320,7 +390,6 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
         "Unresolved compilation unit dependency token discovered: '" + raw_dep +
         "' requested by target node: '" + from_target.qualifiedName + "'");
   }
-
   return resolved;
 }
 
@@ -397,11 +466,10 @@ std::vector<std::string>
 Graph::getTransitiveDependencies(const std::string &qualified_name) {
   std::unordered_set<std::string> visited;
   std::vector<std::string> out_libs;
-
   collectTransitive(qualified_name, visited, out_libs);
-
   return out_libs;
 }
+
 std::string Graph::getTargetBuildSubdir() const {
   std::string pk =
       (m_options.profile == BuildProfile::RELEASE) ? "release" : "debug";
@@ -563,7 +631,6 @@ Graph::resolveTargetSources(const Target &target,
     }
   }
 
-  // Keep target lists unique and deterministically ordered
   std::sort(res.begin(), res.end());
   res.erase(std::unique(res.begin(), res.end()), res.end());
   return res;
@@ -617,6 +684,7 @@ static std::string triggerToString(HookTrigger trigger) {
     return "unknown";
   }
 }
+
 void Graph::executeHooks(const std::shared_ptr<ProjectManifest> &manifest,
                          HookTrigger trigger, const std::string &target_name) {
   for (const auto &hook : manifest->hooks) {

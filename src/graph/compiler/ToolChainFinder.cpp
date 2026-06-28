@@ -192,6 +192,7 @@ std::string ToolchainFinder::findWindowsBinary(const std::string &name) const {
 
   return "";
 #endif
+  return "";
 }
 
 std::expected<std::unique_ptr<ICompiler>, std::string>

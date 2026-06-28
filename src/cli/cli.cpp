@@ -132,6 +132,11 @@ void Cli::initCommands() {
                                   [this](const std::vector<std::string> &args) {
                                     return handleHelp(args);
                                   }};
+  m_supported_commands["version"] = {
+      "mokai --version", "logs current mokai version",
+      [this](const std::vector<std::string> &args) {
+        return handleVersion(args);
+      }};
 }
 
 int Cli::Run(int argc, char *argv[]) {
@@ -343,6 +348,12 @@ printWrapped(const std::string_view &text, size_t max_line_length = 80,
 }
 
 std::expected<std::monostate, CliError>
+Cli::handleVersion(const std::vector<std::string> &args) {
+  std::println("{}", MOKAI_VERSION);
+  return {};
+}
+
+std::expected<std::monostate, CliError>
 Cli::handleHelp(const std::vector<std::string> &args) {
   if (args.empty()) {
     logSupportedCommands();
@@ -431,7 +442,6 @@ Cli::handleBuild(const std::vector<std::string> &args) {
         CliError::Code::BuildFailed,
         "Build pipeline aborted: cyclic or invalid dependencies detected"});
   }
-
   if (!graph.BuildAllTree(buildOrder)) {
     return std::unexpected(CliError{
         CliError::Code::BuildFailed,

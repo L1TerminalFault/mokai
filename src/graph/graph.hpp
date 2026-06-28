@@ -65,6 +65,13 @@ private:
   resolveDependsOnEntry(const std::string &raw_dep,
                         const QualifiedTarget &from_target);
 
+  void loadSourcesCache();
+  std::string getSourcesCachePath() const;
+  void saveSourcesCache();
+  std::unordered_map<std::string,
+                     std::pair<std::string, std::vector<std::string>>>
+      m_diskSourcesCache;
+  std::unordered_map<std::string, std::string> m_targetManifestPaths;
   std::vector<std::string>
   resolveTargetSources(const Target &target,
                        const std::shared_ptr<ProjectManifest> &manifest);

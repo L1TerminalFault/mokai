@@ -1,17 +1,41 @@
 #include "graph.hpp"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <fstream>
 #include <mutex>
+#include <print>
 #include <queue>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 namespace fs = std::filesystem;
 
 namespace mokai {
+
 class Graph::BuildPipeline {
+private:
+  struct ThreadState {
+    bool active{false};
+    std::string current_file{""};
+    std::chrono::steady_clock::time_point start_time;
+  };
+  int m_frame = 0;
+  int m_anim_step{0};
+
+  std::atomic<int> m_total_compile_tasks{0};
+
+  std::mutex m_progress_mutex;
+  std::vector<ThreadState> m_thread_states;
+  unsigned int m_num_threads{0};
+  bool m_terminal_initialized{false};
+
+  // Dedicated UI manager to completely eliminate thread-tearing waterfall bugs
+  std::thread m_ui_thread;
+  std::atomic<bool> m_ui_running{false};
+
 public:
   struct Task {
     std::string source;
@@ -32,25 +56,195 @@ public:
     std::vector<std::string> object_files;
   };
 
+  void initTerminalLayout() {
+    if (m_terminal_initialized)
+      return;
+    m_num_threads = std::thread::hardware_concurrency();
+    m_thread_states.resize(m_num_threads);
+
+    // Allocate vertical visual lines cleanly ahead of time so the jumps don't
+    // scroll past the top viewport
+    int total_lines = m_num_threads + 12;
+    for (int i = 0; i < total_lines; ++i) {
+      std::println("");
+    }
+    m_terminal_initialized = true;
+  }
+  void bootSequence() {
+    std::string boot_text = "INITIALIZING_MOKAI_CORE...";
+    for (char c : boot_text) {
+      std::print("\033[1;32m{}\033[0m", c);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    std::print("\n");
+  }
+
+  void drawPipelineDashboard() {
+    std::lock_guard<std::mutex> lock(m_progress_mutex);
+    m_frame++;
+
+    constexpr const char *kFace = "(>w<)";
+    constexpr int kWidth = 80;
+    constexpr int kBarWidth = 30;
+
+    auto visibleLen = [](const std::string &s) {
+      int len = 0;
+      for (unsigned char c : s) {
+        if ((c & 0xC0) != 0x80)
+          ++len;
+      }
+      return len;
+    };
+
+    auto repeatUtf8 = [](const std::string &unit, int n) {
+      std::string out;
+      out.reserve(unit.size() * static_cast<size_t>(n));
+      for (int i = 0; i < n; ++i)
+        out += unit;
+      return out;
+    };
+
+    // Pad PLAIN text to kWidth visible columns — always pad before wrapping
+    // in ANSI color codes, since escape bytes would otherwise get counted
+    // as visible characters and throw the math off.
+    auto padRow = [&](const std::string &text) {
+      int pad = kWidth - visibleLen(text);
+      if (pad < 0)
+        pad = 0;
+      return text + std::string(static_cast<size_t>(pad), ' ');
+    };
+
+    // \033[K on every line: clears any stale character left over from a
+    // previous, longer frame at this exact row — this is what fixes the
+    // misalignment, not the padding logic itself.
+    auto printRow = [&](const std::string &colorCode, const std::string &text) {
+      std::print("\033[1;36m  ┃{}{}\033[1;36m┃\033[0m\033[K\n", colorCode,
+                 padRow(text));
+    };
+
+    std::string top = "┏" + repeatUtf8("━", kWidth) + "┓";
+    std::string mid = "┣" + repeatUtf8("━", kWidth) + "┫";
+    std::string bot = "┗" + repeatUtf8("━", kWidth) + "┛";
+
+    int total = m_total_compile_tasks.load();
+    int done = m_completed_tasks.load();
+    if (total <= 0)
+      total = 1;
+    if (done > total)
+      done = total;
+    int pct = (done * 100) / total;
+    int filled = (done * kBarWidth) / total;
+
+    std::string bar = "[" + repeatUtf8("█", filled) +
+                      repeatUtf8("░", kBarWidth - filled) + "]";
+    std::string progress_text = bar + " " + std::to_string(pct) + "%  (" +
+                                std::to_string(done) + "/" +
+                                std::to_string(total) + " files)";
+
+    // Collect active filenames, but describe them properly: a count up front,
+    // and a graceful "+N more" cutoff instead of chopping a filename in half.
+    std::vector<std::string> active_files;
+    for (unsigned int i = 0; i < m_num_threads; ++i) {
+      if (m_thread_states[i].active) {
+        active_files.push_back(
+            fs::path(m_thread_states[i].current_file).filename().string());
+      }
+    }
+
+    std::string active_text;
+    if (active_files.empty()) {
+      active_text = "\u25B8 " +
+                    std::string(done >= total ? "linking final artifacts..."
+                                              : "warming up compile queue...");
+    } else {
+      active_text = "\u25B8 compiling " + std::to_string(active_files.size()) +
+                    (active_files.size() == 1 ? " file: " : " files: ");
+      std::string list;
+      size_t shown = 0;
+      for (; shown < active_files.size(); ++shown) {
+        std::string next = (shown > 0 ? ", " : "") + active_files[shown];
+        if (visibleLen(active_text) + visibleLen(list) + visibleLen(next) >
+            kWidth - 1) {
+          break;
+        }
+        list += next;
+      }
+      active_text += list;
+      if (shown < active_files.size()) {
+        active_text +=
+            " +" + std::to_string(active_files.size() - shown) + " more";
+      }
+    }
+
+    std::print("\033[H");
+    std::print("\033[1;36m  {}\033[0m\033[K\n", top);
+    printRow("\033[1;35m", " MOKAI BUILD  " + std::string(kFace));
+    std::print("\033[1;36m  {}\033[0m\033[K\n", mid);
+    printRow("\033[1;32m", " " + progress_text);
+    printRow("\033[1;33m", " " + active_text);
+    std::print("\033[1;36m  {}\033[0m\033[K\n", bot);
+    std::print(
+        "\033[J"); // clear any leftover lines below a previously taller frame
+    std::fflush(stdout);
+  }
+
+  void startUiLoop() {
+    m_ui_running = true;
+    m_ui_thread = std::thread([this]() {
+      while (m_ui_running) {
+        drawPipelineDashboard();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    });
+  }
+
+  void stopUiLoop() {
+    if (m_ui_running) {
+      m_ui_running = false;
+      if (m_ui_thread.joinable()) {
+        m_ui_thread.join();
+      }
+      // Trigger one ultimate complete rendering frame update to lock the UI
+      // structure clean
+      drawPipelineDashboard();
+    }
+  }
+
   BuildPipeline(Graph &graph, const std::vector<std::string> &build_order)
       : m_graph(graph), m_order(build_order), m_failed(false), m_stop(false),
         m_completed_tasks(0), m_processed_tasks(0), m_finished_targets(0) {
     m_total_targets = static_cast<int>(m_order.size());
     m_working_dir = fs::absolute(fs::current_path()).string();
-    m_build_dir = m_graph.m_root_manifest->output.directory + "/" +
-                  m_graph.getTargetBuildSubdir();
-    m_obj_dir = m_build_dir + "/obj";
+
+    std::string raw_dir = m_graph.m_root_manifest->output.directory;
+    fs::path base_out = raw_dir;
+    bool is_root = (base_out == base_out.root_path());
+
+    if (raw_dir.empty() || is_root) {
+      base_out = "./build";
+    }
+
+    std::string subdir = m_graph.getTargetBuildSubdir();
+    while (subdir.starts_with("/") || subdir.starts_with("\\")) {
+      subdir = subdir.substr(1);
+    }
+
+    fs::path target_build_path = fs::absolute(base_out / subdir);
+    m_build_dir = target_build_path.string();
+    m_obj_dir = (target_build_path / "obj").string();
     m_cache_path = "./.mokai/mokai.cache";
   }
 
-  ~BuildPipeline() { stopWorkers(); }
+  ~BuildPipeline() {
+    stopUiLoop();
+    stopWorkers();
+  }
 
   bool execute() {
     if (m_order.empty())
       return true;
     if (!m_graph.m_compiler)
       return false;
-
     fs::create_directories(m_obj_dir);
     fs::create_directories("./.mokai");
 
@@ -60,7 +254,8 @@ public:
     computeDirtyTargets();
     if (!m_needs_any_work && !m_graph.m_options.force_rebuild) {
       if (m_graph.m_options.verbosity != Verbosity::Quiet) {
-        m_graph.m_logger.Success("Build is up to date.");
+        m_graph.m_logger.Success(
+            "Build system synchronization complete: zero units dirty.");
       }
       return true;
     }
@@ -72,6 +267,9 @@ public:
         m_ready_queue.push(qn);
       }
     }
+
+    initTerminalLayout();
+    startUiLoop();
 
     std::unique_lock<std::mutex> lock(m_state_mutex);
     while (m_finished_targets < m_total_targets && !m_failed) {
@@ -90,10 +288,19 @@ public:
     }
     lock.unlock();
 
+    stopUiLoop();
     stopWorkers();
 
-    if (m_failed)
+    if (m_failed) {
+      std::println("\n\033[1;31m [!] BUILD FAILED ── compiler exited non-zero, "
+                   "nothing crashed though (-_-;)\033[0m");
       return false;
+    }
+    if (m_total_compile_tasks.load() > 0) {
+      std::println("\n\033[1;32m ── ALL TARGETS LINKED ── {} files compiled "
+                   "clean ヽ(•‿•)ノ\033[0m",
+                   m_total_compile_tasks.load());
+    }
 
     saveStateCache();
     m_graph.executeHooks(m_graph.m_root_manifest, HookTrigger::PostBuild, "");
@@ -189,7 +396,7 @@ private:
   void spawnWorkers() {
     unsigned int threads = std::thread::hardware_concurrency();
     for (unsigned int i = 0; i < threads; ++i) {
-      m_workers.emplace_back([this]() {
+      m_workers.emplace_back([this, i]() {
         while (true) {
           std::pair<std::shared_ptr<TargetContext>, Task> item;
           {
@@ -205,6 +412,13 @@ private:
 
           auto &ctx = item.first;
           auto &task = item.second;
+
+          {
+            std::lock_guard<std::mutex> state_lock(m_progress_mutex);
+            m_thread_states[i].current_file = task.source;
+            m_thread_states[i].start_time = std::chrono::steady_clock::now();
+            m_thread_states[i].active = true;
+          }
 
           std::vector<std::string> args = {
               m_graph.m_compiler->getCompilerBinary(task.is_c)};
@@ -236,6 +450,12 @@ private:
 
           ctx->remaining_tasks--;
           m_completed_tasks++;
+
+          {
+            std::lock_guard<std::mutex> state_lock(m_progress_mutex);
+            m_thread_states[i].active = false;
+          }
+
           m_cv.notify_one();
         }
       });
@@ -304,9 +524,7 @@ private:
             add_inc(i, dep.manifest->base_dir);
           if (dep.manifest->exports) {
             for (const auto &i : dep.manifest->exports->include_dirs)
-              add_inc(i, dep.manifest->exports->include_dirs.empty()
-                             ? dep.manifest->base_dir
-                             : dep.manifest->base_dir);
+              add_inc(i, dep.manifest->base_dir);
           }
           self(self, dep.manifest);
         }
@@ -357,6 +575,7 @@ private:
       std::lock_guard<std::mutex> lock(db_mutex);
       m_compilation_entries.push_back(entry);
     }
+    m_compilation_database_dirty = true;
   }
 
   void processReadyTargets() {
@@ -379,11 +598,8 @@ private:
         continue;
       }
 
-      if (m_workers.empty())
-        spawnWorkers();
-
-      auto b_args = collectBuildFlags(qt, cr);
-      generateCompilationDatabaseEntries(cr, qt, *b_args);
+      std::shared_ptr<std::vector<std::string>> b_args = nullptr;
+      bool lazy_init_done = false;
 
       auto ctx = std::make_shared<TargetContext>();
       ctx->target_ref = qt;
@@ -406,8 +622,16 @@ private:
           if (m_graph.m_options.force_rebuild || !m_state_cache.count(s) ||
               m_state_cache[s].first != m_graph.getNormalizedFileTimestamp(s) ||
               !fs::exists(o)) {
+
+            if (!lazy_init_done) {
+              b_args = collectBuildFlags(qt, cr);
+              generateCompilationDatabaseEntries(cr, qt, *b_args);
+              lazy_init_done = true;
+            }
+
             ctx->remaining_tasks++;
             ctx->structural_change = true;
+            m_total_compile_tasks++;
 
             bool is_c = fs::path(s).extension() == ".c";
             std::string std_flag =
@@ -427,6 +651,9 @@ private:
             m_ready_queue.push(d);
         }
       } else {
+        if (m_workers.empty()) {
+          spawnWorkers();
+        }
         m_queue_cv.notify_all();
         m_active_contexts.push_back(ctx);
       }
@@ -511,6 +738,8 @@ private:
   }
 
   void emitCompileCommands() {
+    if (!m_compilation_database_dirty)
+      return;
     std::ofstream file("compile_commands.json");
     if (!file.is_open())
       return;
@@ -531,9 +760,10 @@ private:
   std::string m_cache_path;
 
   bool m_needs_any_work;
+  bool m_compilation_database_dirty = false;
   std::atomic<bool> m_failed;
   std::atomic<bool> m_stop;
-  std::atomic<int> m_completed_tasks;
+  std::atomic<int> m_completed_tasks{0};
   int m_processed_tasks;
   int m_finished_targets;
   int m_total_targets;
@@ -570,7 +800,8 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::high_resolution_clock::now() - start_time)
                         .count();
-    m_logger.Success("Build complete in " + std::to_string(duration) + "ms.");
+    m_logger.Success("Build execution complete in " + std::to_string(duration) +
+                     "ms.");
   }
   return true;
 }

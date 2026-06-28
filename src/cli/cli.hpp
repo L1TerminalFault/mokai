@@ -12,7 +12,7 @@
 #include <variant>
 #include <vector>
 
-inline constexpr std::string_view MOKAI_VERSION = "v0.0.1a";
+inline constexpr std::string_view MOKAI_VERSION = "v0.0.5a";
 
 namespace mokai {
 
@@ -122,5 +122,8 @@ private:
 
   std::expected<std::monostate, CliError>
   handleCreateProject(const std::vector<std::string> &args);
+
+  std::expected<std::monostate, CliError>
+  handleVersion(const std::vector<std::string> &args);
 };
 } // namespace mokai
