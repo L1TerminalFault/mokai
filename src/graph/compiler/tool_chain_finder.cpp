@@ -3,10 +3,13 @@
 #include "gcc_compiler.hpp"
 #include "log/log.h"
 #include "msvc_compiler.hpp"
+#include <algorithm>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <memory>
-#include <unistd.h>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #ifdef _WIN32
@@ -15,9 +18,9 @@
 #include <unistd.h>
 #endif
 
+namespace fs = std::filesystem;
+
 namespace mokai {
-ToolchainFinder::ToolchainFinder(mokai::log::Logger &logger)
-    : m_logger(logger) {}
 
 std::string ToolchainFinder::findBinary(const std::string &name) const {
 #ifdef _WIN32
@@ -26,7 +29,6 @@ std::string ToolchainFinder::findBinary(const std::string &name) const {
   return findUnixBinary(name);
 #endif
 }
-namespace fs = std::filesystem;
 
 std::string ToolchainFinder::findUnixBinary(const std::string &name) const {
 #ifndef _WIN32
@@ -51,12 +53,14 @@ std::string ToolchainFinder::findUnixBinary(const std::string &name) const {
   std::vector<std::string> candidates;
 
   while (std::getline(ss, dir, ':')) {
-    if (dir.empty())
+    if (dir.empty()) {
       continue;
+    }
 
     fs::path dir_path(dir);
-    if (!fs::exists(dir_path) || !fs::is_directory(dir_path))
+    if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) {
       continue;
+    }
 
     fs::path direct_match = dir_path / name;
     if (fs::exists(direct_match) && !fs::is_directory(direct_match)) {
@@ -67,8 +71,9 @@ std::string ToolchainFinder::findUnixBinary(const std::string &name) const {
 
     try {
       for (const auto &entry : fs::directory_iterator(dir_path)) {
-        if (!entry.is_regular_file())
+        if (!entry.is_regular_file()) {
           continue;
+        }
 
         std::string filename = entry.path().filename().string();
         if (filename.rfind(name + "-", 0) == 0) {
@@ -91,6 +96,7 @@ std::string ToolchainFinder::findUnixBinary(const std::string &name) const {
 
   return candidates.front();
 #endif
+  return "";
 }
 
 std::string ToolchainFinder::findWindowsBinary(const std::string &name) const {
@@ -112,8 +118,9 @@ std::string ToolchainFinder::findWindowsBinary(const std::string &name) const {
     std::stringstream ss(path_str);
     std::string dir;
     while (std::getline(ss, dir, ';')) {
-      if (dir.empty())
+      if (dir.empty()) {
         continue;
+      }
       fs::path candidate = fs::path(dir) / name;
       if (name.find('.') == std::string::npos && !fs::exists(candidate)) {
         candidate.replace_extension(".exe");
@@ -164,10 +171,12 @@ std::string ToolchainFinder::findWindowsBinary(const std::string &name) const {
 #endif
 
           if (!result.empty()) {
-            if (result.back() == '\n')
+            if (result.back() == '\n') {
               result.pop_back();
-            if (result.back() == '\r')
+            }
+            if (result.back() == '\r') {
               result.pop_back();
+            }
             fs::path found_path(result);
             if (fs::exists(found_path)) {
               return fs::absolute(found_path).string();
@@ -182,8 +191,9 @@ std::string ToolchainFinder::findWindowsBinary(const std::string &name) const {
     const char *pf = std::getenv("ProgramFiles");
     if (pf) {
       fs::path llvm_candidate = fs::path(pf) / "LLVM" / "bin" / name;
-      if (name.find('.') == std::string::npos)
+      if (name.find('.') == std::string::npos) {
         llvm_candidate.replace_extension(".exe");
+      }
       if (fs::exists(llvm_candidate) && !fs::is_directory(llvm_candidate)) {
         return fs::absolute(llvm_candidate).string();
       }
@@ -200,35 +210,40 @@ ToolchainFinder::discover(const std::string &user_pref) {
   if (!user_pref.empty()) {
     std::string valid_pref = findBinary(user_pref);
     if (valid_pref.empty()) {
-      return std::unexpected("User-preferred compiler binary '" + user_pref +
-                             "' was not found on system PATH.");
+      return std::unexpected(std::format(
+          "User-preferred compiler binary '{}' was not found on system PATH.",
+          user_pref));
     }
-    // clang
+
     if (user_pref.find("clang") != std::string::npos) {
       std::string c_bin = "clang";
       std::string cpp_bin = user_pref;
-      // derive clang++ if clang is given and the other way around too
+
       if (user_pref.find("clang++") != std::string::npos) {
         std::string derived_c = user_pref;
         size_t pos = derived_c.find("clang++");
         derived_c.replace(pos, 7, "clang");
-        if (!findBinary(derived_c).empty())
+        if (!findBinary(derived_c).empty()) {
           c_bin = derived_c;
+        }
       } else {
         std::string derived_cpp = user_pref;
         size_t pos = derived_cpp.find("clang");
         derived_cpp.replace(pos, 5, "clang++");
-        if (!findBinary(derived_cpp).empty())
+        if (!findBinary(derived_cpp).empty()) {
           cpp_bin = derived_cpp;
+        }
       }
 
       std::string final_ar = findBinary("llvm-ar");
-      if (final_ar.empty())
+      if (final_ar.empty()) {
         final_ar = findBinary("ar");
+      }
 
       if (final_ar.empty()) {
-        return std::unexpected("No archiver found (llvm-ar or ar). "
-                               "Set [project] compiler_path or archiver_path.");
+        return std::unexpected(
+            "No archiver found (llvm-ar or ar). Set compiler_path or "
+            "archiver_path.");
       }
 
       return std::make_unique<ClangCompiler>(
@@ -244,14 +259,16 @@ ToolchainFinder::discover(const std::string &user_pref) {
         std::string derived_c = user_pref;
         size_t pos = derived_c.find("g++");
         derived_c.replace(pos, 3, "gcc");
-        if (!findBinary(derived_c).empty())
+        if (!findBinary(derived_c).empty()) {
           c_bin = derived_c;
+        }
       } else {
         std::string derived_cpp = user_pref;
         size_t pos = derived_cpp.find("gcc");
         derived_cpp.replace(pos, 3, "g++");
-        if (!findBinary(derived_cpp).empty())
+        if (!findBinary(derived_cpp).empty()) {
           cpp_bin = derived_cpp;
+        }
       }
       std::string ar_bin = findBinary("ar");
       return std::make_unique<GccCompiler>(std::move(c_bin), std::move(cpp_bin),
@@ -263,15 +280,18 @@ ToolchainFinder::discover(const std::string &user_pref) {
       std::string cl_cpp = user_pref;
       std::string lib_ar = findBinary("lib");
 
-      if (cl_c.empty())
+      if (cl_c.empty()) {
         cl_c = "cl";
-      if (lib_ar.empty())
+      }
+      if (lib_ar.empty()) {
         lib_ar = "lib";
+      }
 
       return std::make_unique<MsvcCompiler>(std::move(cl_c), std::move(cl_cpp),
                                             std::move(lib_ar));
     }
   }
+
   std::string gcc_c = findBinary("gcc");
   std::string gcc_cpp = findBinary("g++");
   std::string clang_c = findBinary("clang");
@@ -283,31 +303,38 @@ ToolchainFinder::discover(const std::string &user_pref) {
   std::string lib_ar = findBinary("lib");
 
   int available_toolchains = 0;
-  if (!clang_cpp.empty())
+  if (!clang_cpp.empty()) {
     available_toolchains++;
-  if (!gcc_cpp.empty())
+  }
+  if (!gcc_cpp.empty()) {
     available_toolchains++;
-  if (!cl_bin.empty())
+  }
+  if (!cl_bin.empty()) {
     available_toolchains++;
+  }
 
   if (available_toolchains > 1) {
     std::string msg = "Multiple toolchains found on PATH (";
-    if (!gcc_cpp.empty())
+    if (!gcc_cpp.empty()) {
       msg += "GCC, ";
-    if (!clang_cpp.empty())
+    }
+    if (!clang_cpp.empty()) {
       msg += "Clang, ";
-    if (!cl_bin.empty())
+    }
+    if (!cl_bin.empty()) {
       msg += "MSVC, ";
-    if (msg.ends_with(", "))
+    }
+    if (msg.ends_with(", ")) {
       msg.resize(msg.size() - 2);
+    }
 
-    // new default ranking strategy GCC > Clang > MSVC
     std::string choice =
         !gcc_cpp.empty() ? "g++" : (!clang_cpp.empty() ? "clang++" : "cl");
     msg += "). Defaulting to " + choice +
            ". Set [project] default_compiler to override.";
-    m_logger.Warn(msg);
+    Log::Warn(msg);
   }
+
   if (!clang_cpp.empty()) {
     std::string final_ar = llvm_ar.empty() ? ar_bin : llvm_ar;
     return std::make_unique<ClangCompiler>(
@@ -320,13 +347,15 @@ ToolchainFinder::discover(const std::string &user_pref) {
   }
 
   if (!cl_bin.empty()) {
-    if (lib_ar.empty())
+    if (lib_ar.empty()) {
       lib_ar = "lib";
+    }
     return std::make_unique<MsvcCompiler>(cl_bin, cl_bin, std::move(lib_ar));
   }
 
-  m_logger.Error("No valid C/C++ compiler discovered on system PATH.");
+  Log::Error("No valid C/C++ compiler discovered on system PATH.");
   throw std::runtime_error(
       "Mokai Build Core Error: Toolchain Discovery Exhausted.");
 }
+
 } // namespace mokai

@@ -1,5 +1,5 @@
 #include "cli/cli.hpp"
-#include "telemetry/log.hpp"
+#include "log/log.h"
 
 int main(int argc, char *argv[]) {
   mokai::PerfScope total_runtime("Total process execution");

@@ -2,11 +2,13 @@
 #include "cli/cli.hpp"
 #include "config/toml.hpp"
 #include "graph/types.hpp"
+#include "log/log.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -21,16 +23,15 @@ namespace fs = std::filesystem;
 
 namespace mokai {
 
-// ============================================================================
-// Intelligent DX Engine (Levenshtein Distance for Typo Detection)
-// ============================================================================
 static size_t calculateDistance(std::string_view s1, std::string_view s2) {
   const size_t len1 = s1.size(), len2 = s2.size();
   std::vector<std::vector<size_t>> d(len1 + 1, std::vector<size_t>(len2 + 1));
-  for (size_t i = 0; i <= len1; ++i)
+  for (size_t i = 0; i <= len1; ++i) {
     d[i][0] = i;
-  for (size_t j = 0; j <= len2; ++j)
+  }
+  for (size_t j = 0; j <= len2; ++j) {
     d[0][j] = j;
+  }
 
   for (size_t i = 1; i <= len1; ++i) {
     for (size_t j = 1; j <= len2; ++j) {
@@ -43,9 +44,6 @@ static size_t calculateDistance(std::string_view s1, std::string_view s2) {
   return d[len1][len2];
 }
 
-// ============================================================================
-// Global Paths Engine
-// ============================================================================
 static fs::path getGlobalMokaiDir() {
 #if defined(_WIN32) || defined(_WIN64)
   const char *localAppdata = std::getenv("LOCALAPPDATA");
@@ -58,20 +56,15 @@ static fs::path getGlobalMokaiDir() {
 
 Config::Config(std::string workingDir, GlobalOptions &ops) {
   if (!checkIsFolderAndExists(workingDir)) {
-    std::string hint = "Ensure you are targeting the correct project root.";
+    std::string hint = "Ensure the specified project root path is correct.";
     auto fuzzyDir = fuzzyFindCloseFolder(workingDir);
     if (fuzzyDir.found) {
-      hint = "Found a similar directory '\033[1m" +
-             fs::path(fuzzyDir.best_match).filename().string() +
-             "\033[0m'. Did you make a typo?";
+      hint = std::format("Did you mean to use directory '{}'?",
+                         fs::path(fuzzyDir.best_match).filename().string());
     }
-    m_logger.Error("Configuration Error: The specified directory does not "
-                   "exist or is inaccessible:\n"
-                   "  Path: \"" +
-                   workingDir +
-                   "\"\n"
-                   "  \033[36m💡 Hint:\033[0m " +
-                   hint);
+    Log::Error(std::format(
+        "Specified directory does not exist or is inaccessible: '{}'\nHint: {}",
+        workingDir, hint));
     return;
   }
 
@@ -81,37 +74,34 @@ Config::Config(std::string workingDir, GlobalOptions &ops) {
   std::string config_path_str = config_path.string();
 
   if (!checkIsFileAndExists(config_path_str)) {
-    std::string hint =
-        "Run '\033[1mmokai create\033[0m' to scaffold a new project workspace.";
+    std::string hint = "Run 'mokai create' to scaffold a new workspace.";
     auto fuzzyFile = fuzzyFindCloseFile(config_path_str);
     if (fuzzyFile.found) {
-      hint = "Found a close match named '\033[1m" +
-             fs::path(fuzzyFile.best_match).filename().string() +
-             "\033[0m'. Did you make a typo when naming the file?";
+      hint = std::format(
+          "A similar file exists: '{}'. Check if the file is correctly named "
+          "'mokai.toml'.",
+          fs::path(fuzzyFile.best_match).filename().string());
     }
-    m_logger.Error("Configuration Error: Missing project manifest file.\n"
-                   "  Expected Location: \"" +
-                   config_path.string() +
-                   "\"\n"
-                   "  \033[36m💡 Hint:\033[0m " +
-                   hint);
+    Log::Error(
+        std::format("Missing project manifest file at location: '{}'\nHint: {}",
+                    config_path.string(), hint));
     return;
   }
 
   if (auto res = loadConfig(config_path_str); !res) {
-    m_logger.Error(res.error());
+    Log::Error(res.error());
     return;
   }
 
   if (auto res = parseConfig(); !res) {
-    if (!res.error().empty())
-      m_logger.Error(res.error());
+    if (!res.error().empty()) {
+      Log::Error(res.error());
+    }
     return;
   }
   if (auto res = extractProjectData(ops); !res) {
-    m_logger.Error("Manifest Validation Error: Failed to build project model "
-                   "from 'mokai.toml'.");
-    m_logger.Error(res.error());
+    Log::Error("Failed to build project model from 'mokai.toml'.");
+    Log::Error(res.error());
     return;
   }
 }
@@ -119,9 +109,8 @@ Config::Config(std::string workingDir, GlobalOptions &ops) {
 std::expected<void, std::string> Config::loadConfig(const std::string &path) {
   std::ifstream file(path);
   if (!file.is_open()) {
-    return std::unexpected("File I/O Error: Unable to open configuration file "
-                           "for reading.\n  Path: \"" +
-                           path + "\"");
+    return std::unexpected(
+        std::format("Unable to open manifest file: '{}'", path));
   }
 
   std::stringstream stream;
@@ -129,8 +118,8 @@ std::expected<void, std::string> Config::loadConfig(const std::string &path) {
   m_file_content = stream.str();
 
   if (m_file_content.empty()) {
-    return std::unexpected("Manifest Error: The file \"" + path +
-                           "\" was read successfully but contains zero bytes.");
+    return std::unexpected(std::format(
+        "Manifest file contains no configuration data: '{}'", path));
   }
   return {};
 }
@@ -147,8 +136,9 @@ std::expected<void, std::string> Config::parseConfig() {
     std::stringstream ss(m_file_content);
     size_t current_line = 1;
     while (std::getline(ss, source_line)) {
-      if (current_line == target_line)
+      if (current_line == target_line) {
         break;
+      }
       current_line++;
     }
 
@@ -157,11 +147,10 @@ std::expected<void, std::string> Config::parseConfig() {
       caret_len = static_cast<int>(source.end.column - target_col);
     }
 
-    m_logger.Error(
-        "TOML Syntax Error: Failed to parse configuration manifest.");
-    m_logger.ErrorInline(source_line, std::string(e.description()),
-                         static_cast<int>(target_line),
-                         static_cast<int>(target_col - 1), caret_len);
+    Log::Error("Failed to parse project manifest (syntax error).");
+    Log::ErrorInline({source_line, e.description(),
+                      static_cast<int>(target_line),
+                      static_cast<int>(target_col - 1), caret_len});
 
     return std::unexpected("");
   }
@@ -186,13 +175,13 @@ Config::extractProjectData(GlobalOptions &ops) {
 
   if (!projectTable.is_table()) {
     return std::unexpected(
-        "Validation Error: Missing global [project] block header.");
+        "Missing required [project] header inside the configuration file.");
   }
 
   metadata.name = projectTable["name"].value_or("");
   if (metadata.name.empty()) {
-    return std::unexpected("Validation Error: Missing required key 'name' "
-                           "inside the [project] block.");
+    return std::unexpected("Required field 'name' is missing or empty from the "
+                           "[project] configuration.");
   }
 
   metadata.version = projectTable["version"].value_or("");
@@ -213,24 +202,23 @@ Config::extractProjectData(GlobalOptions &ops) {
     metadata.version_from = std::move(vf);
   }
 
-  // extract cpp version
   auto cppversion = projectTable["cpp_version"].value<std::string>();
   static const std::vector<std::string> known_versions{
       "c++11", "c++14", "c++17", "c++20", "c++23", "c++26"};
-  metadata.cpp_version = cppversion.value_or("c++23"); // default to 23
+  metadata.cpp_version = cppversion.value_or("c++23");
   if (!std::ranges::contains(known_versions, metadata.cpp_version)) {
-    return std::unexpected("Validation Error: Unrecognized C++ standard: \"" +
-                           metadata.cpp_version + "\"");
+    return std::unexpected(std::format("Unsupported C++ standard version: '{}'",
+                                       metadata.cpp_version));
   }
-  // extract c version
+
   static const std::vector<std::string> known_c_versions{"c89", "c90", "c99",
                                                          "c11", "c17", "c23"};
 
   auto cversion = projectTable["c_version"].value<std::string>();
-  metadata.c_version = cversion.value_or("c11"); // default to 11
+  metadata.c_version = cversion.value_or("c11");
   if (!std::ranges::contains(known_c_versions, metadata.c_version)) {
-    return std::unexpected("Validation Error: Unrecognized C standard: \"" +
-                           metadata.c_version + "\"");
+    return std::unexpected(std::format("Unsupported C standard version: '{}'",
+                                       metadata.c_version));
   }
 
   extract_string_array(projectTable["authors"], metadata.authors);
@@ -245,13 +233,13 @@ Config::extractProjectData(GlobalOptions &ops) {
 
         if (isLocDep(depStr)) {
           fs::path dep_path = fs::path(m_manifest.base_dir) / depStr;
-          m_logger.Info("Package Router: Resolving local link mapping -> " +
-                        depStr);
+          Log::Info(
+              std::format("Resolving local path dependency: '{}'", depStr));
 
           if (!fs::exists(dep_path)) {
-            return std::unexpected("Package Router Error: Local dependency "
-                                   "directory does not exist: " +
-                                   dep_path.string());
+            return std::unexpected(
+                std::format("Local dependency directory not found: '{}'",
+                            dep_path.string()));
           }
 
           fs::path canonical_path = fs::canonical(dep_path);
@@ -262,8 +250,8 @@ Config::extractProjectData(GlobalOptions &ops) {
 
         } else if (isGitDep(depStr)) {
           return std::unexpected(
-              "Package Router Error: Direct 'git:' dependencies have been "
-              "deprecated. Please use the Global Registry.");
+              "Direct 'git:' dependency URLs are no longer supported. Please "
+              "register and refer to packages using the global registry.");
         } else {
           std::string pkgName = depStr;
           std::string pkgVersionSpec = "latest";
@@ -277,25 +265,25 @@ Config::extractProjectData(GlobalOptions &ops) {
           fs::path registryDir = globalMokai / "registry";
 
           if (!fs::exists(registryDir)) {
-            m_logger.Info("Package Router: Initializing global mokai registry "
-                          "for the first time...");
+            Log::Info("Initializing global registry clone...");
             fs::create_directories(registryDir.parent_path());
             std::string regCloneCmd =
                 "git clone --depth=1 --progress "
                 "https://github.com/L1TerminalFault/mokai_confs " +
                 registryDir.string();
             if (std::system(regCloneCmd.c_str()) != 0) {
-              return std::unexpected(
-                  "Package Router Error: Critical initialization failure "
-                  "syncing tracking maps.");
+              return std::unexpected("Critical failure while downloading "
+                                     "dependencies metadata maps "
+                                     "from remote repository.");
             }
           }
 
           fs::path manifestRecipeFile = registryDir / (pkgName + ".toml");
 
           if (!fs::exists(manifestRecipeFile)) {
-            m_logger.Info("Package Router: Package '" + pkgName +
-                          "' not found locally. Syncing registry...");
+            Log::Info(std::format(
+                "Package '{}' not found in local cache. Synchronizing index...",
+                pkgName));
             std::string regCleanCmd = "git -C " + registryDir.string() +
                                       " reset --hard HEAD > /dev/null 2>&1";
             std::system(regCleanCmd.c_str());
@@ -316,9 +304,10 @@ Config::extractProjectData(GlobalOptions &ops) {
                                         .value<std::string>()
                                         .value_or("");
               if (gitRepo.empty()) {
-                return std::unexpected(
-                    "Registry Error: Package '" + pkgName +
-                    "' is missing 'project.git_repo' mapping.");
+                return std::unexpected(std::format(
+                    "Registry manifest for '{}' is missing required 'git_repo' "
+                    "mapping.",
+                    pkgName));
               }
 
               std::string packageGitUrl = gitRepo;
@@ -334,31 +323,31 @@ Config::extractProjectData(GlobalOptions &ops) {
                 } else if (auto latestNode = recipesTable->get("latest")) {
                   recipeTomlContent =
                       latestNode->value<std::string>().value_or("");
-                  m_logger.Warn("Notice: Exact version '" + pkgVersionSpec +
-                                "' not found for '" + pkgName +
-                                "'. Falling back to 'latest'.");
+                  Log::Warn(std::format(
+                      "Version '{}' not found for '{}'. Falling back to "
+                      "'latest'.",
+                      pkgVersionSpec, pkgName));
                 }
               }
 
               if (recipeTomlContent.empty()) {
-                return std::unexpected("Registry Error: Could not resolve a "
-                                       "valid recipe string for package '" +
-                                       pkgName + "'.");
+                return std::unexpected(std::format(
+                    "Unable to resolve a valid build recipe for package '{}'.",
+                    pkgName));
               }
 
               fs::path targetPkgBuildDir = globalMokai / "packages" / pkgName;
               fs::create_directories(targetPkgBuildDir.parent_path());
 
               if (!fs::exists(targetPkgBuildDir)) {
-                m_logger.Info("Package Manager: Cloning [" + pkgName +
-                              "] globally -> " + packageGitUrl);
+                Log::Info(std::format("Cloning global repository for '{}': {}",
+                                      pkgName, packageGitUrl));
                 std::string pkgCloneCmd = "git clone --progress " +
                                           packageGitUrl + " " +
                                           targetPkgBuildDir.string();
                 if (std::system(pkgCloneCmd.c_str()) != 0) {
-                  return std::unexpected(
-                      "Package Manager Error: Failed to clone package: " +
-                      pkgName);
+                  return std::unexpected(std::format(
+                      "Git clone operation failed for package '{}'.", pkgName));
                 }
               }
 
@@ -373,14 +362,14 @@ Config::extractProjectData(GlobalOptions &ops) {
                   ResolvedDependency{spec, depconfig.getManifest()};
 
             } catch (const std::exception &e) {
-              return std::unexpected(std::string("Registry Parsing Failure: ") +
-                                     e.what());
+              return std::unexpected(std::format(
+                  "Registry metadata parsing failure: {}", e.what()));
             }
           } else {
-            return std::unexpected("Registry Resolution Failure: The library "
-                                   "package tracking map '" +
-                                   pkgName +
-                                   "' does not exist in central registry.");
+            return std::unexpected(
+                std::format("Package '{}' is not registered in the central "
+                            "package registry.",
+                            pkgName));
           }
         }
       }
@@ -428,8 +417,9 @@ Config::extractProjectData(GlobalOptions &ops) {
         PropertyGroup group;
         group.name = std::string(key.str());
         extract_string_array((*inner_table)["defines"], group.defines);
-        if (auto cond = (*inner_table)["condition"].value<std::string>())
+        if (auto cond = (*inner_table)["condition"].value<std::string>()) {
           group.condition = std::move(*cond);
+        }
         m_manifest.property_groups.push_back(std::move(group));
       }
     }
@@ -442,16 +432,18 @@ Config::extractProjectData(GlobalOptions &ops) {
         target.name = std::string(key.str());
 
         std::string type_str = (*inner_table)["type"].value_or("");
-        if (type_str == "executable")
+        if (type_str == "executable") {
           target.type = TargetType::Executable;
-        else if (type_str == "static_library")
+        } else if (type_str == "static_library") {
           target.type = TargetType::StaticLibrary;
-        else if (type_str == "shared_library")
+        } else if (type_str == "shared_library") {
           target.type = TargetType::SharedLibrary;
-        else
-          return std::unexpected("Target Validation Error: Invalid type "
-                                 "context flag inside build targets: " +
-                                 target.name);
+        } else {
+          return std::unexpected(std::format(
+              "Target '{}' specifies an invalid type. Supported types: "
+              "'executable', 'static_library', 'shared_library'.",
+              target.name));
+        }
 
         extract_string_array((*inner_table)["sources"], target.sources);
         extract_string_array((*inner_table)["include_dirs"],
@@ -473,29 +465,35 @@ Config::extractProjectData(GlobalOptions &ops) {
         hook.name = std::string(key.str());
 
         std::string trigger_str = (*inner_table)["on"].value_or("");
-        if (trigger_str == "pre_build")
+        if (trigger_str == "pre_build") {
           hook.trigger = HookTrigger::PreBuild;
-        else if (trigger_str == "post_build")
+        } else if (trigger_str == "post_build") {
           hook.trigger = HookTrigger::PostBuild;
-        else if (trigger_str == "pre_target_build")
+        } else if (trigger_str == "pre_target_build") {
           hook.trigger = HookTrigger::PreTargetBuild;
-        else if (trigger_str == "post_target_build")
+        } else if (trigger_str == "post_target_build") {
           hook.trigger = HookTrigger::PostTargetBuild;
-        else if (trigger_str == "file_change")
+        } else if (trigger_str == "file_change") {
           hook.trigger = HookTrigger::FileChange;
-        else
-          return std::unexpected("Hook Validation Error: Step trigger "
-                                 "unrecognized parsing workspace hooks.");
+        } else {
+          return std::unexpected(
+              std::format("Hook '{}' specifies an invalid 'on' trigger action.",
+                          hook.name));
+        }
 
         hook.run = (*inner_table)["run"].value_or("");
-        if (hook.run.empty())
-          return std::unexpected("Hook Validation Error: Interceptor "
-                                 "configuration script parameter missing.");
+        if (hook.run.empty()) {
+          return std::unexpected(std::format(
+              "Hook '{}' is missing the required 'run' command parameter.",
+              hook.name));
+        }
 
-        if (auto tgt = (*inner_table)["target"].value<std::string>())
+        if (auto tgt = (*inner_table)["target"].value<std::string>()) {
           hook.target = std::move(*tgt);
-        if (auto pat = (*inner_table)["pattern"].value<std::string>())
+        }
+        if (auto pat = (*inner_table)["pattern"].value<std::string>()) {
           hook.pattern = std::move(*pat);
+        }
 
         m_manifest.hooks.push_back(std::move(hook));
       }
@@ -506,9 +504,11 @@ Config::extractProjectData(GlobalOptions &ops) {
     Exports exp;
     extract_string_array((*exports_table)["default_targets"],
                          exp.default_targets);
-    if (exp.default_targets.empty())
-      return std::unexpected("Validation Error: Declared [exports] block "
-                             "structural layout requires missing keys.");
+    if (exp.default_targets.empty()) {
+      return std::unexpected(
+          "The [exports] block layout requires the 'default_targets' list to "
+          "be specified.");
+    }
 
     extract_string_array((*exports_table)["include_dirs"], exp.include_dirs);
     extract_string_array((*exports_table)["defines_required"],
@@ -542,25 +542,23 @@ Config::extractProjectData(GlobalOptions &ops) {
     }
   }
 
-  m_logger.Success("Extracted Config For: " + m_manifest.project.name);
   return {};
 }
 
 bool Config::createProject(const std::string &projectName) {
   std::string chosenName = projectName;
   if (chosenName.empty()) {
-    std::cout << "\033[1;34m⚙\033[0m Enter project name signature "
-                 "[untitled_project]: ";
+    std::cout << "Enter project name [untitled_project]: ";
     std::getline(std::cin, chosenName);
-    if (chosenName.empty())
+    if (chosenName.empty()) {
       chosenName = "untitled_project";
+    }
   }
 
   fs::path projectRoot = fs::current_path() / chosenName;
   if (fs::exists(projectRoot)) {
-    std::cout
-        << "\033[1;31m✘ Configuration Error:\033[0m Workspace target path \""
-        << chosenName << "\" already explicitly exists.\n";
+    Log::Error(
+        std::format("Target directory '{}' already exists.", chosenName));
     return false;
   }
 
@@ -583,14 +581,12 @@ bool Config::createProject(const std::string &projectName) {
              << "    return 0;\n"
              << "}\n";
 
-    std::cout << "\033[1;32m✓ Pipeline Initialization Success:\033[0m "
-                 "Workspace generated cleanly inside: "
-              << projectRoot.string() << "\n";
+    Log::Success(std::format("Scaffolded new project workspace at: {}",
+                             projectRoot.string()));
     return true;
   } catch (const std::exception &e) {
-    std::cout << "\033[1;31m✘ System I/O Error:\033[0m Failed to spawn "
-                 "workspace files: "
-              << e.what() << "\n";
+    Log::Error(
+        std::format("Failed to generate project skeleton: {}", e.what()));
     return false;
   }
 }
@@ -606,7 +602,7 @@ bool Config::runTarget(const std::string &targetName) {
 
   if (!matchedTarget) {
     std::string hint =
-        "Check your 'mokai.toml' file for the exact target name.";
+        "Verify target configurations defined in your mokai.toml.";
     std::string best_match;
     size_t min_dist = 4;
     for (const auto &t : m_manifest.targets) {
@@ -617,21 +613,17 @@ bool Config::runTarget(const std::string &targetName) {
       }
     }
     if (!best_match.empty()) {
-      hint = "Did you mean to run '\033[1m" + best_match + "\033[0m'?";
+      hint = std::format("Did you mean target '{}'?", best_match);
     }
 
-    m_logger.Error("Runtime Execution Error: Target build execution node '" +
-                   targetName +
-                   "' was not found in manifest mappings.\n"
-                   "  \033[36m💡 Hint:\033[0m " +
-                   hint);
+    Log::Error(
+        std::format("Target '{}' not found.\nHint: {}", targetName, hint));
     return false;
   }
 
   if (matchedTarget->type != TargetType::Executable) {
-    m_logger.Error(
-        "Runtime Execution Error: Target entity '" + targetName +
-        "' matches a library compilation pattern instead of an executable.");
+    Log::Error(
+        std::format("Target '{}' is not an executable type.", targetName));
     return false;
   }
 
@@ -645,28 +637,27 @@ bool Config::runTarget(const std::string &targetName) {
       break;
     }
   }
-  if (!profileSubdir.empty())
+  if (!profileSubdir.empty()) {
     absoluteOutputBinPath /= profileSubdir;
+  }
   absoluteOutputBinPath /= targetName;
 
   if (!fs::exists(absoluteOutputBinPath)) {
-    m_logger.Error("Compilation Mismatch: Executable target binary not found "
-                   "at pathway location:\n  Path: \"" +
-                   absoluteOutputBinPath.string() +
-                   "\"\n"
-                   "  Hint: Build the pipeline layout target tracking "
-                   "dependencies before launching execution units.");
+    Log::Error(std::format(
+        "Executable binary not found at: '{}'\nHint: Build the target before "
+        "executing it.",
+        absoluteOutputBinPath.string()));
     return false;
   }
 
-  m_logger.Info("Launching process pipeline unit: " + targetName + " -> " +
-                absoluteOutputBinPath.string());
+  Log::Info(std::format("Executing target '{}' ({})", targetName,
+                        absoluteOutputBinPath.string()));
 
   int exitStatus = std::system(absoluteOutputBinPath.string().c_str());
 
   if (exitStatus == -1) {
-    m_logger.Error("Runtime Execution Error: Failed to spawn child process "
-                   "sub-shell context.");
+    Log::Error(std::format(
+        "Process execution terminated with error on target: '{}'", targetName));
     return false;
   }
 
@@ -693,8 +684,9 @@ FuzzyFindResult Config::fuzzyFindCloseFile(std::string &path) {
   fs::path parent = p.has_parent_path() ? p.parent_path() : fs::current_path();
   std::string filename = p.filename().string();
 
-  if (!fs::exists(parent))
+  if (!fs::exists(parent)) {
     return {false, ""};
+  }
 
   std::string best_match;
   size_t min_dist = 4;
@@ -712,8 +704,9 @@ FuzzyFindResult Config::fuzzyFindCloseFile(std::string &path) {
   } catch (...) {
   }
 
-  if (!best_match.empty())
+  if (!best_match.empty()) {
     return {true, best_match};
+  }
   return {false, ""};
 }
 
@@ -722,8 +715,9 @@ FuzzyFindResult Config::fuzzyFindCloseFolder(std::string &path) {
   fs::path parent = p.has_parent_path() ? p.parent_path() : fs::current_path();
   std::string folderName = p.filename().string();
 
-  if (!fs::exists(parent))
+  if (!fs::exists(parent)) {
     return {false, ""};
+  }
 
   std::string best_match;
   size_t min_dist = 4;
@@ -741,8 +735,9 @@ FuzzyFindResult Config::fuzzyFindCloseFolder(std::string &path) {
   } catch (...) {
   }
 
-  if (!best_match.empty())
+  if (!best_match.empty()) {
     return {true, best_match};
+  }
   return {false, ""};
 }
 

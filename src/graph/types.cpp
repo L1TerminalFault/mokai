@@ -1,5 +1,4 @@
 #include "graph/types.hpp"
-#include <algorithm>
 
 namespace mokai {
 

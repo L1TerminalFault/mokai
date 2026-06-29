@@ -1,7 +1,5 @@
 #pragma once
 
-#include "log/log.h"
-#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -21,7 +19,6 @@ public:
   void registerSystemPropreties();
 
 private:
-  mutable log::Logger m_logger;
   std::unordered_map<std::string, std::string> m_registry;
 
   std::vector<std::string> tokenize(const std::string &expr) const;

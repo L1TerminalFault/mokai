@@ -3,22 +3,19 @@
 #include "compiler/icompiler.hpp"
 #include "graph/condition/ConditionEval.hpp"
 #include "graph/types.hpp"
-#include "log/log.h"
 #include <expected>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
 namespace mokai {
 
 struct GlobalOptions;
 
-static std::mutex g_log_mutex;
-
-constexpr uint32_t MOKAI_CACHE_MAGIC = 0x4D4F4B41; // "MOKA"
+constexpr uint32_t MOKAI_CACHE_MAGIC = 0x4D4F4B41;
 constexpr uint32_t MOKAI_CACHE_VERSION = 1;
 
 class Graph {
@@ -52,7 +49,6 @@ private:
   void populateRegistry(std::shared_ptr<ProjectManifest> manifest,
                         const std::string_view path_prefix);
 
-  // Binary Graph Caching (Includes resolved sources)
   bool tryLoadGraphCache();
   void saveGraphCache();
   std::string getCachePath() const;
@@ -68,10 +64,7 @@ private:
   void loadSourcesCache();
   std::string getSourcesCachePath() const;
   void saveSourcesCache();
-  std::unordered_map<std::string,
-                     std::pair<std::string, std::vector<std::string>>>
-      m_diskSourcesCache;
-  std::unordered_map<std::string, std::string> m_targetManifestPaths;
+
   std::vector<std::string>
   resolveTargetSources(const Target &target,
                        const std::shared_ptr<ProjectManifest> &manifest);
@@ -90,15 +83,17 @@ private:
 
   std::string getTargetBuildSubdir() const;
 
-  // Direct getter exposing the engine to config.cpp so it can bind options
-  // safely
   ConditionEngine &getConditionEngine() { return *m_conditionEngine; }
   const ConditionEngine &getConditionEngine() const {
     return *m_conditionEngine;
   }
+
   struct BuildRecord {
-    std::string source, timestamp, hash;
+    std::string source;
+    std::string timestamp;
+    std::string hash;
   };
+
   using StateCacheMap =
       std::unordered_map<std::string, std::pair<std::string, std::string>>;
 
@@ -112,24 +107,22 @@ private:
   std::string
   getNormalizedFileTimestamp(const std::filesystem::path &path) const;
 
-  // Private Member Data fields
+private:
   std::unique_ptr<ConditionEngine> m_conditionEngine;
   std::unique_ptr<ICompiler> m_compiler;
   enum class NodeState { Unvisited, Visiting, Done };
 
-  mutable mokai::log::Logger m_logger;
   const GlobalOptions &m_options;
 
   std::unordered_map<std::string, QualifiedTarget> m_targetRegistry;
   std::unordered_set<ProjectManifest *> m_processedManifests;
-
-  // Cache of Manifest Timestamps
   std::unordered_map<std::string, std::string> m_manifestTimestamps;
-
-  // Cache of Resolved Source Files (FQDN -> List of Paths)
-  // This prevents re-running regex globbing on every build.
   std::unordered_map<std::string, std::vector<std::string>>
       m_resolvedSourcesCache;
+  std::unordered_map<std::string,
+                     std::pair<std::string, std::vector<std::string>>>
+      m_diskSourcesCache;
+  std::unordered_map<std::string, std::string> m_targetManifestPaths;
 
   std::shared_ptr<ProjectManifest> m_root_manifest;
   std::vector<GraphEdge> m_edges;

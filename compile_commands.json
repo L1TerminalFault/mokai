@@ -51,11 +51,6 @@
   },
   {
     "directory": "/home/k/Documents/mokai",
-    "command": "/usr/bin/clang++ -std=c++23 -O3 -fPIC -I/home/k/Documents/mokai/tests -I/home/k/Documents/mokai/src -c \"/home/k/Documents/mokai/src/log/log.cpp\"",
-    "file": "/home/k/Documents/mokai/src/log/log.cpp"
-  },
-  {
-    "directory": "/home/k/Documents/mokai",
     "command": "/usr/bin/clang++ -std=c++23 -O3 -fPIC -I/home/k/Documents/mokai/tests -I/home/k/Documents/mokai/src -c \"/home/k/Documents/mokai/src/templates/template.cpp\"",
     "file": "/home/k/Documents/mokai/src/templates/template.cpp"
   },

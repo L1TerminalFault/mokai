@@ -1,11 +1,16 @@
 #include "graph.hpp"
+#include "log/log.h"
+#include <format>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
 namespace mokai {
+
 std::string Graph::getNormalizedFileTimestamp(const fs::path &path) const {
-  if (!fs::exists(path))
+  if (!fs::exists(path)) {
     return "";
+  }
   auto ftime = fs::last_write_time(path);
   auto duration = ftime.time_since_epoch();
   auto millis =
@@ -15,26 +20,27 @@ std::string Graph::getNormalizedFileTimestamp(const fs::path &path) const {
 
 bool Graph::tryLoadGraphCache() {
   std::string path = getCachePath();
-  if (!fs::exists(path))
+  if (!fs::exists(path)) {
     return false;
+  }
 
   std::ifstream is(path, std::ios::binary);
-  if (!is.is_open())
+  if (!is.is_open()) {
     return false;
+  }
 
   try {
-    // Verify Format Headers
     uint32_t magic = 0;
     uint32_t version = 0;
     is.read(reinterpret_cast<char *>(&magic), sizeof(magic));
     is.read(reinterpret_cast<char *>(&version), sizeof(version));
 
     if (magic != MOKAI_CACHE_MAGIC) {
-      m_logger.Warn("Invalid cache file signature. Ignoring stale cache.");
+      Log::Warn("Invalid cache file signature. Ignoring stale cache.");
       return false;
     }
     if (version != MOKAI_CACHE_VERSION) {
-      m_logger.Warn("Mokai cache schema version mismatch. Regenerating graph.");
+      Log::Warn("Mokai cache schema version mismatch. Regenerating graph.");
       return false;
     }
 
@@ -71,19 +77,18 @@ bool Graph::tryLoadGraphCache() {
     }
 
     if (cache_is_partially_dirty) {
-      m_logger.Warn("Incremental changes detected inside manifest layouts. "
-                    "Re-validating out-of-date targets.");
+      Log::Warn("Incremental changes detected inside manifest layouts. "
+                "Re-validating out-of-date targets.");
     }
 
   } catch (const std::ios_base::failure &e) {
-    m_logger.Error(
-        std::string(
-            "Mokai binary graph cache reading corrupted or truncated: ") +
-        e.what());
+    Log::Error(std::format(
+        "Mokai binary graph cache reading corrupted or truncated: {}",
+        e.what()));
     return false;
   } catch (const std::exception &e) {
-    m_logger.Error(std::string("Failed to parse dependency graph cache: ") +
-                   e.what());
+    Log::Error(
+        std::format("Failed to parse dependency graph cache: {}", e.what()));
     return false;
   }
 
@@ -93,13 +98,12 @@ bool Graph::tryLoadGraphCache() {
 void Graph::saveGraphCache() {
   std::ofstream os(getCachePath(), std::ios::binary);
   if (!os.is_open()) {
-    m_logger.Error(
+    Log::Error(
         "Failed to open cache location for writing file telemetry data.");
     return;
   }
 
   try {
-    //  Write Binary Schema Safe Guards
     os.write(reinterpret_cast<const char *>(&MOKAI_CACHE_MAGIC),
              sizeof(MOKAI_CACHE_MAGIC));
     os.write(reinterpret_cast<const char *>(&MOKAI_CACHE_VERSION),
@@ -126,9 +130,9 @@ void Graph::saveGraphCache() {
       writeVector(os, srcs);
     }
   } catch (const std::exception &e) {
-    m_logger.Error(std::string("Abrupt error encountered while writing back "
-                               "graph updates to disk: ") +
-                   e.what());
+    Log::Error(std::format(
+        "Abrupt error encountered while writing back graph updates to disk: {}",
+        e.what()));
   }
 }
 

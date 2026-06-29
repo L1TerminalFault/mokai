@@ -1,5 +1,7 @@
 #include "ConditionEval.hpp"
+#include "log/log.h"
 #include <algorithm>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -124,7 +126,6 @@ ConditionEngine::tokenize(const std::string &expr) const {
 
 bool ConditionEngine::evalAtom(const std::string &left, const std::string &op,
                                const std::string &right) const {
-  // resolve values from the registry or fallback to literals
   auto it_left = m_registry.find(left);
   std::string_view final_left =
       (it_left != m_registry.end()) ? it_left->second : left;
@@ -133,32 +134,35 @@ bool ConditionEngine::evalAtom(const std::string &left, const std::string &op,
   std::string_view final_right =
       (it_right != m_registry.end()) ? it_right->second : right;
 
-  // String operations
-  if (op == "==")
+  if (op == "==") {
     return final_left == final_right;
-  if (op == "!=")
+  }
+  if (op == "!=") {
     return final_left != final_right;
+  }
 
   try {
-    if (op == "<=")
+    if (op == "<=") {
       return std::stof(std::string(final_left)) <=
              std::stof(std::string(final_right));
-    if (op == ">=")
+    }
+    if (op == ">=") {
       return std::stof(std::string(final_left)) >=
              std::stof(std::string(final_right));
-    if (op == "<")
+    }
+    if (op == "<") {
       return std::stof(std::string(final_left)) <
              std::stof(std::string(final_right));
-    if (op == ">")
+    }
+    if (op == ">") {
       return std::stof(std::string(final_left)) >
              std::stof(std::string(final_right));
+    }
   } catch (...) {
-    // Fallback: If std::stof fails due to non-numeric types,
-    // treated basic alphanumeric string bounds comparisons
-    m_logger.Error("Invalid conditional comparison: Operator '" + op +
-                   " cannot be applied to non-numeric operands " +
-                   std::string(final_left) + "' and '" +
-                   std::string(final_right) + "'.");
+    Log::Error(std::format(
+        "Invalid conditional comparison: Operator '{}' cannot be applied to "
+        "non-numeric operands '{}' and '{}'.",
+        op, final_left, final_right));
   }
 
   return false;
@@ -174,8 +178,8 @@ bool ConditionEngine::evaluate(const std::string &expression) const {
   bool result = parseLogicalExpr(tokens, index);
 
   if (index < tokens.size()) {
-    m_logger.Error("Mokai Condition Error: Unexpected trailing tokens after "
-                   "expression parsing boundary.");
+    Log::Error("Mokai Condition Error: Unexpected trailing tokens after "
+               "expression parsing boundary.");
   }
   return result;
 }
@@ -214,8 +218,8 @@ bool ConditionEngine::parseBooleanFactor(const std::vector<std::string> &tokens,
     if (index < tokens.size() && tokens[index] == ")") {
       index++;
     } else {
-      m_logger.Error("Mokai Condition Error: Mismatched parentheses around "
-                     "logical expression.");
+      Log::Error("Mokai Condition Error: Mismatched parentheses around "
+                 "logical expression.");
     }
     return result;
   }
@@ -228,9 +232,9 @@ bool ConditionEngine::parseBooleanFactor(const std::vector<std::string> &tokens,
         op == ">=") {
       index++;
       if (index >= tokens.size()) {
-        m_logger.Error("Mokai Condition Error: Missing right-hand operand "
-                       "after operator '" +
-                       op + "'.");
+        Log::Error(std::format("Mokai Condition Error: Missing right-hand "
+                               "operand after operator '{}'.",
+                               op));
         return false;
       }
       std::string right_val = parseValue(tokens, index);
@@ -244,8 +248,8 @@ bool ConditionEngine::parseBooleanFactor(const std::vector<std::string> &tokens,
 std::string ConditionEngine::parseValue(const std::vector<std::string> &tokens,
                                         size_t &index) const {
   if (index >= tokens.size()) {
-    m_logger.Error("Mokai Condition Error: Expected an operand identifier or "
-                   "literal value.");
+    Log::Error("Mokai Condition Error: Expected an operand identifier or "
+               "literal value.");
     return "";
   }
 
@@ -262,9 +266,10 @@ std::string ConditionEngine::parseValue(const std::vector<std::string> &tokens,
   }
   bool is_number = std::all_of(token.begin(), token.end(), ::isdigit);
   if (!is_number && token != "true" && token != "false") {
-    m_logger.Warn("Unknown identifier '" + token + "'");
+    Log::Warn(std::format("Unknown identifier '{}'", token));
   }
 
   return token;
 }
+
 } // namespace mokai

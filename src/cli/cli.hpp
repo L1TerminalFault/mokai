@@ -1,7 +1,7 @@
 #pragma once
+
 #include "config/config.hpp"
 #include "core/os.hpp"
-#include "log/log.h"
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -18,21 +18,6 @@ namespace mokai {
 
 enum class Verbosity { Quiet, Default, Verbose };
 enum class ColorMode { Auto, Always, Never };
-
-namespace Style {
-inline constexpr std::string_view Reset = "\033[0m";
-inline constexpr std::string_view Bold = "\033[1m";
-inline constexpr std::string_view Dim = "\033[90m";
-inline constexpr std::string_view Green = "\033[38;5;42m";
-inline constexpr std::string_view Cyan = "\033[36m";
-inline constexpr std::string_view Red = "\033[31m";
-inline constexpr std::string_view Yellow = "\033[33m";
-inline constexpr std::string_view Arrow = "❯ ";
-inline constexpr std::string_view Success = "✔ ";
-inline constexpr std::string_view Info = "ℹ ";
-inline constexpr std::string_view Error = "✖ ";
-} // namespace Style
-
 enum class BuildProfile { DEBUG, RELEASE, MINSIZEREL };
 
 struct GlobalOptions {
@@ -50,7 +35,6 @@ struct GlobalOptions {
   std::string default_compiler;
 };
 
-// Based on POSIX standard
 enum class ExitCode : int {
   Success = 0,
   GeneralFailure = 1,
@@ -85,6 +69,7 @@ class Cli {
 public:
   Cli() = default;
   ~Cli() = default;
+
   std::expected<std::monostate, CliError> ParseCliArgs(int argc, char *argv[]);
   int Run(int argc, char *argv[]);
 
@@ -94,14 +79,10 @@ private:
     std::filesystem::file_time_type last_modified;
   };
 
-  // Path-indexed cache storage for parsed configuration profiles
   std::unordered_map<std::string, ConfigCacheEntry> m_config_registry;
 
-  // Internal helper to fetch parsed manifest files safely without hitting the
-  // disk redundantly
   Config *getConfig(const std::filesystem::path &tomlPath);
 
-  log::Logger m_logger;
   GlobalOptions m_options;
   std::unordered_map<std::string, CommandInfo> m_supported_commands;
 
@@ -126,4 +107,5 @@ private:
   std::expected<std::monostate, CliError>
   handleVersion(const std::vector<std::string> &args);
 };
+
 } // namespace mokai

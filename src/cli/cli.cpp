@@ -3,13 +3,13 @@
 #include "core/os.hpp"
 #include "graph/graph.hpp"
 #include "log/log.h"
-#include "telemetry/log.hpp"
 #include "templates/template.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <print>
@@ -19,7 +19,6 @@
 #include <variant>
 #include <vector>
 
-// Platform conditional header mapping for safe raw terminal ingestion
 #if defined(_WIN32) || defined(_WIN64)
 #include <conio.h>
 #define WIN32_LEAN_AND_MEAN
@@ -34,15 +33,27 @@ namespace fs = std::filesystem;
 
 namespace mokai {
 
+namespace Color {
+constexpr std::string_view Reset = "\033[0m";
+constexpr std::string_view Dim = "\033[90m";
+constexpr std::string_view Green = "\033[32m";
+constexpr std::string_view Cyan = "\033[36m";
+constexpr std::string_view Red = "\033[31m";
+constexpr std::string_view Yellow = "\033[33m";
+constexpr std::string_view Violet = "\033[35m";
+} // namespace Color
+
 namespace dx {
 
 static size_t calculateDistance(std::string_view s1, std::string_view s2) {
   const size_t len1 = s1.size(), len2 = s2.size();
   std::vector<std::vector<size_t>> d(len1 + 1, std::vector<size_t>(len2 + 1));
-  for (size_t i = 0; i <= len1; ++i)
+  for (size_t i = 0; i <= len1; ++i) {
     d[i][0] = i;
-  for (size_t j = 0; j <= len2; ++j)
+  }
+  for (size_t j = 0; j <= len2; ++j) {
     d[0][j] = j;
+  }
 
   for (size_t i = 1; i <= len1; ++i) {
     for (size_t j = 1; j <= len2; ++j) {
@@ -55,21 +66,20 @@ static size_t calculateDistance(std::string_view s1, std::string_view s2) {
   return d[len1][len2];
 }
 
-// Scans a directory to find a file with a typo resembling "mokai.toml"
 static std::string findClosestManifestMatch(const fs::path &dir) {
   std::string closest_match = "";
-  size_t min_distance = 4; // Max distance to be considered a typo
+  size_t min_distance = 4;
 
-  if (!fs::exists(dir) || !fs::is_directory(dir))
+  if (!fs::exists(dir) || !fs::is_directory(dir)) {
     return "";
+  }
 
   try {
     for (const auto &entry : fs::directory_iterator(dir)) {
       if (entry.is_regular_file()) {
         std::string filename = entry.path().filename().string();
         size_t dist = calculateDistance(filename, "mokai.toml");
-        if (dist < min_distance &&
-            dist > 0) { // dist > 0 prevents matching exact 'mokai.toml'
+        if (dist < min_distance && dist > 0) {
           min_distance = dist;
           closest_match = filename;
         }
@@ -82,69 +92,86 @@ static std::string findClosestManifestMatch(const fs::path &dir) {
 }
 
 static std::string formatHint(const std::string &hint_text) {
-  return "\n\n  \033[36m💡 Hint:\033[0m " + hint_text;
+  return "\n\n  Hint: " + hint_text;
 }
 
 } // namespace dx
 
 void Cli::initCommands() {
-  mokai::PerfScope init_probe("CLI: Initialize Command Dispatch Map");
   m_supported_commands["build"] = {
-      "mokai build [path]",
-      "Compiles all dependencies and targets matching structural graph rules.",
+      "build [path]", "Compiles all dependencies and targets in parallel.",
       [this](const std::vector<std::string> &args) {
         return handleBuild(args);
       }};
 
   m_supported_commands["run"] = {
-      "mokai run [target_name] [args...]",
-      "Builds and executes a project binary target, checking default_target "
-      "fallbacks.",
+      "run [target_name] [args...]", "Builds and executes a target binary.",
       [this](const std::vector<std::string> &args) { return handleRun(args); }};
 
   m_supported_commands["create"] = {
-      "mokai create [project_name]",
-      "Spawns a highly-optimized C++ workspace template structure from "
-      "embedded blueprints.",
+      "create [project_name]", "Scaffolds a clean C++ workspace directory.",
       [this](const std::vector<std::string> &args) {
         return handleCreateProject(args);
       }};
 
-  m_supported_commands["add"] = {"mokai add [package]",
-                                 "Injects a centralized dependency requirement "
-                                 "rule configuration into mokai.toml.",
-                                 [this](const std::vector<std::string> &args) {
-                                   return handlePackageAdd(args);
-                                 }};
+  m_supported_commands["add"] = {
+      "add [package]",
+      "Adds a registry or local path dependency to mokai.toml.",
+      [this](const std::vector<std::string> &args) {
+        return handlePackageAdd(args);
+      }};
 
-  m_supported_commands["help"] = {"mokai help [command]",
-                                  "Fetches deep telemetry syntax descriptions "
-                                  "for any tool subcommand toolchain routing.",
-                                  [this](const std::vector<std::string> &args) {
-                                    return handleHelp(args);
-                                  }};
+  m_supported_commands["help"] = {
+      "help [command]", "Displays usage and details for build commands.",
+      [this](const std::vector<std::string> &args) {
+        return handleHelp(args);
+      }};
+
   m_supported_commands["version"] = {
-      "mokai --version", "logs current mokai version",
+      "version", "Displays the current release version of the build engine.",
       [this](const std::vector<std::string> &args) {
         return handleVersion(args);
       }};
 }
 
 int Cli::Run(int argc, char *argv[]) {
-  mokai::PerfScope run_probe("CLI: Argument Parsing & Routing");
   initCommands();
   if (argc == 1) {
-    std::println("mokai v{}", MOKAI_VERSION);
-    std::println("Usage: mokai <command> [args...]\n");
-    std::println("Commands:");
+    std::println("{}mokai v{}{}", Color::Cyan, MOKAI_VERSION, Color::Reset);
+    std::println("");
     logSupportedCommands();
     return static_cast<int>(ExitCode::UsageError);
+  }
+
+  std::string first_arg = argv[1];
+  if (first_arg == "--help" || first_arg == "-h" || first_arg == "help") {
+    if (argc > 2) {
+      handleHelp({argv[2]});
+    } else {
+      std::println("{}mokai v{}{}", Color::Cyan, MOKAI_VERSION, Color::Reset);
+      std::println("");
+      logSupportedCommands();
+      std::println("");
+      std::println("{}Options:{}", Color::Cyan, Color::Reset);
+      std::println(
+          "  -h, --help          Show help details and optional parameters");
+      std::println(
+          "  -v, --verbose       Enable verbose engine debugging outputs");
+      std::println("  -q, --quiet         Suppress non-error notifications");
+      std::println("  --release           Compile targets inside production "
+                   "release profiles");
+      std::println(
+          "  --clean, --no-cache Force complete target recompilation cycles");
+      std::println(
+          "  -j, --jobs <count>  Set parallel worker thread limits manually");
+    }
+    return static_cast<int>(ExitCode::Success);
   }
 
   auto result = ParseCliArgs(argc, argv);
 
   if (!result.has_value()) {
-    m_logger.Error(result.error().message);
+    Log::Error(result.error().message);
 
     switch (result.error().code) {
     case CliError::Code::UnknownCommand:
@@ -165,7 +192,7 @@ int Cli::Run(int argc, char *argv[]) {
 
 std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
                                                           char *argv[]) {
-  mokai::PerfTimer timer;
+  PerfTimer timer;
 
   std::vector<std::string> rawArgs;
   rawArgs.reserve(argc - 1);
@@ -175,8 +202,8 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
 
   std::string command = "";
   std::vector<std::string> subCommandArgs;
+  bool help_requested = false;
 
-  // --- PHASE 1: Argument Parsing ---
   for (size_t i = 0; i < rawArgs.size(); ++i) {
     const auto &arg = rawArgs[i];
 
@@ -194,31 +221,33 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
       m_options.force_rebuild = true;
     } else if (arg == "-j" || arg == "--jobs") {
       if (i + 1 >= rawArgs.size()) {
-        return std::unexpected(
-            CliError{CliError::Code::InvalidArguments,
-                     "Option flag '" + arg +
-                         "' requires a numeric execution count payload value"});
+        return std::unexpected(CliError{
+            CliError::Code::InvalidArguments,
+            "Option flag '" + arg + "' requires a numeric job count value"});
       }
       try {
         m_options.job_count = std::stoi(rawArgs[++i]);
       } catch (...) {
         return std::unexpected(CliError{CliError::Code::InvalidArguments,
-                                        "Invalid numeric payload token value "
-                                        "passed into job allocations: '" +
+                                        "Invalid numeric value provided for "
+                                        "allocated jobs: '" +
                                             rawArgs[i] + "'"});
       }
     } else if (arg == "--target") {
       if (i + 1 >= rawArgs.size()) {
-        return std::unexpected(CliError{CliError::Code::InvalidArguments,
-                                        "Option flag '--target' requires a "
-                                        "tracking definition parameter value"});
+        return std::unexpected(CliError{
+            CliError::Code::InvalidArguments,
+            "Option flag '--target' requires a valid target filter name"});
       }
       m_options.target_filter = rawArgs[++i];
+    } else if (arg == "--version" || arg == "-V") {
+      command = "version";
+    } else if (arg == "-h" || arg == "--help") {
+      help_requested = true;
     } else if (arg.starts_with("-")) {
       return std::unexpected(
           CliError{CliError::Code::UnknownCommand,
-                   "Unrecognized system infrastructure option flag switch: '" +
-                       arg + "'"});
+                   "Unrecognized command option: '" + arg + "'"});
     } else {
       if (command.empty()) {
         command = arg;
@@ -229,19 +258,21 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
   }
   timer.Mark("CLI: Parsing Phase");
 
-  if (m_options.verbosity == Verbosity::Quiet) {
-    m_logger.SetLevel(log::Level::Error);
-  } else if (m_options.verbosity == Verbosity::Verbose) {
-    m_logger.SetLevel(log::Level::Debug);
+  if (help_requested) {
+    if (command.empty()) {
+      logSupportedCommands();
+      return {};
+    } else {
+      return handleHelp({command});
+    }
   }
 
   if (command.empty()) {
-    return std::unexpected(CliError{CliError::Code::UnknownCommand,
-                                    "Missing operational instruction execution "
-                                    "action target path definition context"});
+    return std::unexpected(CliError{
+        CliError::Code::UnknownCommand,
+        "No operational command specified. Define an action to execute."});
   }
 
-  // --- PHASE 2: Command Dispatch ---
   if (auto cmdToDispatch = m_supported_commands.find(command);
       cmdToDispatch != m_supported_commands.end()) {
     auto result = cmdToDispatch->second.callback(subCommandArgs);
@@ -249,8 +280,7 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
     return result;
   }
 
-  // --- PHASE 3: Smart Command Typo Hint ---
-  std::string err = "Unknown command issued: '\033[1m" + command + "\033[0m'";
+  std::string err = "Unknown command: '" + command + "'";
   size_t min_dist = 3;
   std::string closest_cmd;
   for (const auto &[cmd_name, _] : m_supported_commands) {
@@ -261,8 +291,7 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
     }
   }
   if (!closest_cmd.empty()) {
-    err += dx::formatHint("Did you mean '\033[1mmokai " + closest_cmd +
-                          "\033[0m'?");
+    err += dx::formatHint("Did you mean 'mokai " + closest_cmd + "'?");
   }
   timer.Mark("CLI: Typo Resolution");
 
@@ -329,15 +358,17 @@ printWrapped(const std::string_view &text, size_t max_line_length = 80,
       if (break_pt == std::string::npos || break_pt < start) {
         break_pt = start + current_limit;
       }
-      if (!first_line)
+      if (!first_line) {
         std::print("{}", indent);
+      }
       std::println("{}", text.substr(start, break_pt - start));
 
       start = break_pt + 1;
       first_line = false;
     } else {
-      if (!first_line)
+      if (!first_line) {
         std::print("{}", indent);
+      }
       std::println("{}", text.substr(start));
       break;
     }
@@ -354,22 +385,60 @@ std::expected<std::monostate, CliError>
 Cli::handleHelp(const std::vector<std::string> &args) {
   if (args.empty()) {
     logSupportedCommands();
-    return std::unexpected(
-        CliError{CliError::Code::InvalidArguments,
-                 "Help invoked with missing or empty command argument"});
+    return std::unexpected(CliError{CliError::Code::InvalidArguments,
+                                    "No command specified for help lookup."});
   }
 
-  if (auto help = m_supported_commands.find(args[0]);
+  static const std::unordered_map<std::string_view, std::string_view>
+      detailed_descriptions = {
+          {"build",
+           "Compiles all project targets and dependencies matching "
+           "graph configurations. Automatically parses manifests, "
+           "handles glob-patterns, re-evaluates header updates, and "
+           "compiles object targets in parallel via system worker pools."},
+          {"run",
+           "Builds and launches a compiled executable binary target. If "
+           "no target argument is specified, the default target configured "
+           "in mokai.toml is triggered automatically. Trailing arguments "
+           "are forwarded cleanly to the executing sub-process."},
+          {"create",
+           "Launches the interactive initialization wizard to scaffold "
+           "a clean C++ workspace layout. Generates mokai.toml manifests, "
+           "file directories, main entrypoints, and initiates version "
+           "control."},
+          {"add",
+           "Resolves and links a dependency package. Checks matching versions "
+           "inside local and global package indexes, updates dependencies "
+           "blocks "
+           "inside local mokai.toml, and registers libraries with build "
+           "contexts."},
+          {"help",
+           "Displays explicit parameter limits, operational details, option "
+           "flag usage, and description overviews for each build action."},
+          {"version",
+           "Logs the current release flag version of the build tool."}};
+
+  std::string_view cmd = args[0];
+  if (cmd == "--version") {
+    cmd = "version";
+  }
+
+  if (auto help = m_supported_commands.find(std::string(cmd));
       help != m_supported_commands.end()) {
-    std::println("\n {}Command:{} {}", Style::Green, Style::Reset, help->first);
-    std::println(" {}Usage:{}    {}", Style::Cyan, Style::Reset,
-                 help->second.usage);
-    std::print(" {}Details:{} ", Style::Dim, Style::Reset);
-    printWrapped(help->second.explanation, 80, "          ");
+    std::println("\n Command: {}", help->first);
+    std::println(" Usage:   {}", help->second.usage);
+    std::print(" Details: ");
+
+    std::string_view explanation = help->second.explanation;
+    if (auto it = detailed_descriptions.find(cmd);
+        it != detailed_descriptions.end()) {
+      explanation = it->second;
+    }
+
+    printWrapped(explanation, 80, "          ");
     return {};
   } else {
-    std::string err =
-        "Help subsystem unable to locate command: '" + args[0] + "'";
+    std::string err = "Command not found: '" + args[0] + "'";
     size_t min_dist = 3;
     std::string closest_cmd;
     for (const auto &[cmd_name, _] : m_supported_commands) {
@@ -380,8 +449,7 @@ Cli::handleHelp(const std::vector<std::string> &args) {
       }
     }
     if (!closest_cmd.empty()) {
-      err += dx::formatHint("Did you mean to ask for help on '\033[1m" +
-                            closest_cmd + "\033[0m'?");
+      err += dx::formatHint("Did you mean to run 'help " + closest_cmd + "'?");
     }
     return std::unexpected(CliError{CliError::Code::UnknownCommand, err});
   }
@@ -394,7 +462,7 @@ Cli::handleBuild(const std::vector<std::string> &args) {
   if (!fs::exists(workingDir) || !fs::is_directory(workingDir)) {
     return std::unexpected(
         CliError{CliError::Code::InvalidWorkspace,
-                 "Path is not a valid directory: " + workingDir.string()});
+                 "Specified path is not a directory: " + workingDir.string()});
   }
 
   workingDir = fs::absolute(workingDir).lexically_normal();
@@ -402,32 +470,28 @@ Cli::handleBuild(const std::vector<std::string> &args) {
   Config *currentConfig = getConfig(workingDir / "mokai.toml");
 
   if (!currentConfig || !currentConfig->getManifest()) {
-    std::string err = "Could not find or parse a valid "
-                      "'\033[1mmokai.toml\033[0m' manifest in " +
-                      workingDir.string();
+    std::string err =
+        "Could not find a valid 'mokai.toml' file in: " + workingDir.string();
 
     std::string closest = dx::findClosestManifestMatch(workingDir);
     if (!closest.empty()) {
-      err +=
-          dx::formatHint("Found a close match named '\033[1m" + closest +
-                         "\033[0m'. Did you make a typo when naming the file?");
+      err += dx::formatHint("A file named '" + closest +
+                            "' was found. Correct the typo if necessary.");
     } else {
-      err += dx::formatHint("Run '\033[1mmokai create\033[0m' to scaffold a "
-                            "new project workspace.");
+      err += dx::formatHint("Run 'mokai create' to generate a new project.");
     }
     return std::unexpected(CliError{CliError::Code::InvalidWorkspace, err});
   }
 
   if (m_options.verbosity != Verbosity::Quiet) {
-    std::println("{}{}Initializing build target pipeline ({})...{}",
-                 Style::Cyan, Style::Arrow, OS::GetPlatformName(),
-                 Style::Reset);
+    Log::Info(std::format("Initializing build target pipeline for {}...",
+                          OS::GetPlatformName()));
   }
 
   auto graph_result = Graph::Create(currentConfig->getManifest(), m_options);
   if (!graph_result) {
-    m_logger.Error("Failed to initialize dependency graph: " +
-                   graph_result.error());
+    Log::Error("Failed to initialize build dependency graph: " +
+               graph_result.error());
     return {};
   }
 
@@ -435,19 +499,18 @@ Cli::handleBuild(const std::vector<std::string> &args) {
 
   auto buildOrder = graph.computeBuildOrder(graph.getEdges());
   if (buildOrder.empty()) {
-    return std::unexpected(CliError{
-        CliError::Code::BuildFailed,
-        "Build pipeline aborted: cyclic or invalid dependencies detected"});
+    return std::unexpected(
+        CliError{CliError::Code::BuildFailed,
+                 "Cyclic or invalid target dependencies detected."});
   }
   if (!graph.BuildAllTree(buildOrder)) {
-    return std::unexpected(CliError{
-        CliError::Code::BuildFailed,
-        "Compilation sequence dropped out with errors (non-zero exit code)"});
+    return std::unexpected(
+        CliError{CliError::Code::BuildFailed,
+                 "Compilation sequence aborted due to errors."});
   }
 
   if (m_options.verbosity != Verbosity::Quiet) {
-    std::println("\n{}{}Build completed successfully.{}", Style::Green,
-                 Style::Success, Style::Reset);
+    Log::Success("Build completed successfully.");
   }
   return {};
 }
@@ -458,13 +521,11 @@ Cli::handleRun(const std::vector<std::string> &args) {
 
   Config *currentConfig = getConfig(workingDir / "mokai.toml");
   if (!currentConfig || !currentConfig->getManifest()) {
-    std::string err =
-        "Unable to trace workspace root configuration manifest context.";
+    std::string err = "Workspace manifest context not found.";
     std::string closest = dx::findClosestManifestMatch(workingDir);
     if (!closest.empty()) {
-      err += dx::formatHint(
-          "Found a close match named '\033[1m" + closest +
-          "\033[0m'. Fix the typo so mokai can run the project.");
+      err += dx::formatHint("A file named '" + closest +
+                            "' was found. Correct the typo if necessary.");
     }
     return std::unexpected(CliError{CliError::Code::InvalidWorkspace, err});
   }
@@ -482,10 +543,9 @@ Cli::handleRun(const std::vector<std::string> &args) {
       }
     }
 
-    // --- SMART TARGET TYPO HINT ---
     if (!chosenTarget) {
-      std::string err = "No target named '\033[1m" + explicitTargetName +
-                        "\033[0m' found in mokai.toml.";
+      std::string err =
+          "No target named '" + explicitTargetName + "' inside mokai.toml.";
       size_t min_dist = 4;
       std::string closest_target;
       for (const auto &target : manifest->targets) {
@@ -496,14 +556,14 @@ Cli::handleRun(const std::vector<std::string> &args) {
         }
       }
       if (!closest_target.empty()) {
-        err += dx::formatHint("Did you mean to run '\033[1m" + closest_target +
-                              "\033[0m'?");
+        err += dx::formatHint("Did you mean target '" + closest_target + "'?");
       }
       return std::unexpected(CliError{CliError::Code::InvalidArguments, err});
     }
 
-    for (size_t i = 1; i < args.size(); ++i)
+    for (size_t i = 1; i < args.size(); ++i) {
       forwardArgs.push_back(args[i]);
+    }
   } else {
     for (const auto &target : manifest->targets) {
       if (target.is_default && target.type == TargetType::Executable) {
@@ -525,21 +585,20 @@ Cli::handleRun(const std::vector<std::string> &args) {
   if (!chosenTarget) {
     return std::unexpected(
         CliError{CliError::Code::InvalidArguments,
-                 "Execution match failure: No runnable executable binary "
-                 "configurations map into this manifest."});
+                 "No executable target maps found inside the manifest."});
   }
 
   if (chosenTarget->type != TargetType::Executable) {
-    std::string err = "Target validation error: '" + chosenTarget->name +
-                      "' is a library and cannot be run.";
-    err += dx::formatHint("Libraries cannot be executed. Create an executable "
-                          "target in your toml to test your library.");
+    std::string err =
+        "Target '" + chosenTarget->name + "' is not an executable type.";
+    err += dx::formatHint("Libraries cannot be executed directly.");
     return std::unexpected(CliError{CliError::Code::InvalidArguments, err});
   }
 
   auto buildRes = handleBuild({});
-  if (!buildRes.has_value())
+  if (!buildRes.has_value()) {
     return buildRes;
+  }
 
   std::string profileFolder =
       (m_options.profile == BuildProfile::RELEASE) ? "release" : "debug";
@@ -551,15 +610,13 @@ Cli::handleRun(const std::vector<std::string> &args) {
 #endif
 
   if (!fs::exists(binaryPath)) {
-    return std::unexpected(CliError{
+    return std::unexpected(std::unexpected(CliError{
         CliError::Code::GeneralFailure,
-        "Artifact verification failure: Compiled image missing at path \"" +
-            binaryPath.string() + "\""});
+        "Compiled target binary not found at path: " + binaryPath.string()}));
   }
 
   if (m_options.verbosity != Verbosity::Quiet) {
-    std::println("{}{} Launching production artifact: {} {}\n", Style::Green,
-                 Style::Arrow, binaryPath.string(), Style::Reset);
+    Log::Info(std::format("Executing target binary: {}", binaryPath.string()));
   }
 
   std::string execCommand = binaryPath.string();
@@ -571,9 +628,8 @@ Cli::handleRun(const std::vector<std::string> &args) {
   int runtimeExitCode = OS::ExecuteCommand(execCommand, emptyEnv);
 
   if (runtimeExitCode != 0) {
-    std::println(std::cerr,
-                 "\n{}➔ Process exited non-zero runtime status code: {}{}",
-                 Style::Red, runtimeExitCode, Style::Reset);
+    Log::Error(std::format("Process terminated with non-zero exit code: {}",
+                           runtimeExitCode));
   }
 
   return {};
@@ -582,8 +638,9 @@ Cli::handleRun(const std::vector<std::string> &args) {
 static size_t promptChoice(const std::string &title,
                            const std::vector<std::string> &options,
                            size_t default_idx = 0) {
-  if (options.empty())
+  if (options.empty()) {
     return 0;
+  }
 
   size_t current_idx = default_idx;
   const size_t max_visible = 5;
@@ -614,69 +671,74 @@ static size_t promptChoice(const std::string &title,
     }
     first_render = false;
 
-    std::println("{}● {} {}", Style::Cyan, Style::Reset, title);
+    std::println("{}{} (Select using arrow keys or j/k){}", Color::Violet,
+                 title, Color::Reset);
 
     for (size_t i = start_idx;
          i < std::min(options.size(), start_idx + max_visible); ++i) {
       if (i == current_idx) {
-        std::println("  {}{}⦿ {}{}", Style::Green, "❯ ", options[i],
-                     Style::Reset);
+        std::println("  > {}", options[i]);
       } else {
-        std::println("    {}{} {}", Style::Dim, "○", options[i], Style::Reset);
+        std::println("    {}", options[i]);
       }
     }
 
-    std::print("  {}(Use ↑/↓ or j/k to navigate. Enter to select", Style::Dim);
-    if (options.size() > max_visible)
+    std::print("  (Use up/down to navigate, Enter to select");
+    if (options.size() > max_visible) {
       std::print(" | item {}/{}", (current_idx + 1), options.size());
-    std::println("){}", Style::Reset);
+    }
+    std::println(")");
     std::fflush(stdout);
 
 #if defined(_WIN32) || defined(_WIN64)
     int ch = _getch();
     if (ch == 0 || ch == 0xE0) {
       ch = _getch();
-      if (ch == 72 && current_idx > 0)
+      if (ch == 72 && current_idx > 0) {
         current_idx--;
-      else if (ch == 80 && current_idx < options.size() - 1)
+      } else if (ch == 80 && current_idx < options.size() - 1) {
         current_idx++;
+      }
     } else if (ch == '\r' || ch == '\n') {
       selecting = false;
-    } else if (ch == 'k' && current_idx > 0)
+    } else if (ch == 'k' && current_idx > 0) {
       current_idx--;
-    else if (ch == 'j' && current_idx < options.size() - 1)
+    } else if (ch == 'j' && current_idx < options.size() - 1) {
       current_idx++;
-    else if (ch == 3) {
+    } else if (ch == 3) {
       std::print("\033[?25h");
-      std::println("{}\nAborted via interrupt.{}", Style::Red, Style::Reset);
+      std::println("Interrupted.");
       std::exit(130);
     }
 #else
     char ch;
     if (read(STDIN_FILENO, &ch, 1) == 1) {
-      if (ch == '\n' || ch == '\r')
+      if (ch == '\n' || ch == '\r') {
         selecting = false;
-      else if (ch == 'k') {
-        if (current_idx > 0)
+      } else if (ch == 'k') {
+        if (current_idx > 0) {
           current_idx--;
+        }
       } else if (ch == 'j') {
-        if (current_idx < options.size() - 1)
+        if (current_idx < options.size() - 1) {
           current_idx++;
+        }
       } else if (ch == '\033') {
         char seq[2];
         if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
             read(STDIN_FILENO, &seq[1], 1) == 1) {
           if (seq[0] == '[') {
-            if (seq[1] == 'A' && current_idx > 0)
+            if (seq[1] == 'A' && current_idx > 0) {
               current_idx--;
-            else if (seq[1] == 'B' && current_idx < options.size() - 1)
+            } else if (seq[1] == 'B' && current_idx < options.size() - 1) {
               current_idx++;
+            }
           }
         }
       } else if (ch == 3) {
         std::print("\033[?25h");
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-        std::println("{}\nAborted via interrupt.{}", Style::Red, Style::Reset);
+        std::println("Interrupted.");
         std::exit(130);
       }
     }
@@ -689,21 +751,23 @@ static size_t promptChoice(const std::string &title,
 #endif
 
   size_t lines_to_clear = std::min(options.size(), max_visible) + 2;
-  for (size_t i = 0; i < lines_to_clear; ++i)
+  for (size_t i = 0; i < lines_to_clear; ++i) {
     std::print("\033[A\033[2K");
+  }
 
-  std::println("{}{}{} {}› {}{}", Style::Green, Style::Success, title,
-               Style::Dim, Style::Reset, options[current_idx]);
+  std::println("{}> {}: {}{}", Color::Violet, title, options[current_idx],
+               Color::Reset);
 
   return current_idx;
 }
 
 static std::string promptText(const std::string &prompt,
                               const std::string &default_val = "") {
-  std::print("{}{}{}{}", Style::Green, Style::Arrow, Style::Reset, prompt);
-  if (!default_val.empty())
-    std::print("{} ({}){}", Style::Dim, default_val, Style::Reset);
-  std::print(" ");
+  std::print("{}> {}{}", Color::Violet, prompt, Color::Reset);
+  if (!default_val.empty()) {
+    std::print(" ({})", default_val);
+  }
+  std::print(": ");
   std::fflush(stdout);
 
   std::string input;
@@ -719,13 +783,12 @@ std::expected<std::monostate, CliError>
 Cli::handlePackageAdd(const std::vector<std::string> &args) {
   fs::path tomlPath = fs::current_path() / "mokai.toml";
   if (!fs::exists(tomlPath)) {
-    std::string err = "Active workspace error: No 'mokai.toml' file found in "
-                      "current context root";
+    std::string err =
+        "Manifest context not found inside current root directories.";
     std::string closest = dx::findClosestManifestMatch(fs::current_path());
     if (!closest.empty()) {
-      err += dx::formatHint(
-          "Found '\033[1m" + closest +
-          "\033[0m'. Please fix the typo to inject dependencies safely.");
+      err += dx::formatHint("Found similar file '" + closest +
+                            "'. Check file name for typos.");
     }
     return std::unexpected(CliError{CliError::Code::InvalidWorkspace, err});
   }
@@ -735,21 +798,13 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
   if (!args.empty()) {
     chosenPackage = args[0];
   } else {
-    std::println(
-        "\n{}{}📦 Mokai Package Add {}{}– Inject a workspace dependency{}",
-        Style::Green, Style::Reset, Style::Dim, Style::Reset, Style::Reset);
-    std::println("{}──────────────────────────────────────────────────\n{}",
-                 Style::Dim, Style::Reset);
-
     fs::path registryDir =
         OS::GetTemporaryDirectory().parent_path() / ".mokai" / "registry";
 
     if (!fs::exists(registryDir) || fs::is_empty(registryDir)) {
-      std::println("{}{}Central configuration map is uninitialized. Run a "
-                   "target build sequence to sync index assets.{}",
-                   Style::Yellow, Style::Info, Style::Reset);
+      Log::Warn("Package index uninitialized. Build target to sync files.");
       chosenPackage =
-          promptText("Enter package target manually (e.g., sfml@3.0.0):");
+          promptText("Enter package mapping manually (e.g. sfml@3.0.0)");
     } else {
       std::vector<std::string> availablePackages;
       for (const auto &entry : fs::directory_iterator(registryDir)) {
@@ -761,11 +816,11 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
 
       if (availablePackages.empty()) {
         chosenPackage = promptText(
-            "No packages tracked in registry maps. Define entity manually:");
+            "No packages in registry index. Enter package name manually");
       } else {
         size_t pkgIdx = promptChoice(
-            "Select a package to introduce into workspace targets:",
-            availablePackages, 0);
+            "Select target workspace dependency package:", availablePackages,
+            0);
         std::string pkgName = availablePackages[pkgIdx];
 
         fs::path regFile = registryDir / (pkgName + ".toml");
@@ -795,27 +850,27 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
 
         if (constraintOptions.empty()) {
           std::string customVer =
-              promptText("No baseline ranges found. Enter explicit revision "
-                         "rule constraint (or blank for latest):");
+              promptText("No semantic version ranges matched. Enter explicit "
+                         "build target version");
           chosenPackage =
               customVer.empty() ? pkgName : pkgName + "@" + customVer;
         } else {
-          constraintOptions.push_back("Custom Spec Constraint...");
-          size_t verIdx = promptChoice(
-              "Select valid SemVer matching target limits:", constraintOptions,
-              0);
+          constraintOptions.push_back("Enter manual spec constraint...");
+          size_t verIdx =
+              promptChoice("Select matching semantic version limit constraint:",
+                           constraintOptions, 0);
 
-          if (constraintOptions[verIdx] == "Custom Spec Constraint...") {
-            std::string customVer = promptText(
-                "Define constraint parameters manually (e.g., >=1.2.0):");
+          if (constraintOptions[verIdx] == "Enter manual spec constraint...") {
+            std::string customVer =
+                promptText("Specify target version constraint (e.g. >=1.2.0)");
             chosenPackage =
                 customVer.empty() ? pkgName : pkgName + "@" + customVer;
           } else {
             std::string chosenRange = constraintOptions[verIdx];
-            std::string cleanVer = promptText(
-                "Specify target configuration version code (matches range: " +
-                    chosenRange + "):",
-                "1.0.0");
+            std::string cleanVer =
+                promptText("Specify exact target version compatible with (" +
+                               chosenRange + ")",
+                           "1.0.0");
             chosenPackage = pkgName + "@" + cleanVer;
           }
         }
@@ -824,9 +879,9 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
   }
 
   if (chosenPackage.empty()) {
-    return std::unexpected(CliError{CliError::Code::PackageNotFound,
-                                    "Aborted package insertion: Selection "
-                                    "expression sequence invalid or empty"});
+    return std::unexpected(
+        CliError{CliError::Code::PackageNotFound,
+                 "Aborted package resolution: Empty package specifier."});
   }
 
   std::ifstream inFile(tomlPath.string());
@@ -863,29 +918,23 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
   outFile << tomlContent;
   outFile.close();
 
-  std::println("\n{}{}Successfully added dependency to mokai.toml -> {}{}{}",
-               Style::Green, Style::Success, Style::Reset, Style::Bold,
-               chosenPackage, Style::Reset);
-  std::println("{}Hint: Invoke 'mokai build' to evaluate routing graphs and "
-               "trigger smart clone/fetch execution passes.{}",
-               Style::Dim, Style::Reset);
+  Log::Success(std::format("Successfully injected target dependency: {}",
+                           chosenPackage));
   return {};
 }
 
 std::expected<std::monostate, CliError>
 Cli::handleCreateProject(const std::vector<std::string> &args) {
-  std::println("\n{}{}✨ Mokai Initializer {}{}– Create a new environment{}",
-               Style::Green, Style::Reset, Style::Dim, Style::Reset,
-               Style::Reset);
-  std::println("{}──────────────────────────────────────────────────\n{}",
-               Style::Dim, Style::Reset);
-
   std::string project_name;
+
+  std::println("\n{}Mokai Project Scaffolding{}", Color::Violet, Color::Reset);
+  std::println("{}====================================={}", Color::Dim,
+               Color::Reset);
 
   if (!args.empty() && !args[0].empty()) {
     project_name = args[0];
-    std::println("{}{}{} {}› {}{}", Style::Green, Style::Success,
-                 "Project name", Style::Dim, Style::Reset, project_name);
+    std::println("{}> Project name: {} [Passed via arguments]{}", Color::Violet,
+                 project_name, Color::Reset);
   } else {
     project_name = promptText("Project name", "my_mokai_project");
   }
@@ -893,80 +942,174 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   fs::path target_dir = fs::current_path() / project_name;
 
   if (fs::exists(target_dir)) {
-    return std::unexpected(CliError{CliError::Code::InvalidArguments,
-                                    "Project creation aborted: Directory '" +
-                                        project_name + "' already exists"});
+    return std::unexpected(
+        CliError{CliError::Code::InvalidArguments,
+                 "Workspace configuration error: Path already exists: '" +
+                     project_name + "'"});
   }
 
-  std::vector<std::string> cpp_versions = {"c++11", "c++14", "c++17",
-                                           "c++20", "c++23", "c++26"};
-  size_t cpp_idx = promptChoice(
-      "Select C++ Language Specification Target:", cpp_versions, 4);
-  std::string chosen_cpp = cpp_versions[cpp_idx];
+  std::vector<std::string> lang_families = {"C++", "C"};
+  size_t lang_idx =
+      promptChoice("Select programming language family", lang_families, 0);
+  std::string chosen_lang = lang_families[lang_idx];
+
+  std::string chosen_std;
+  if (chosen_lang == "C++") {
+    std::vector<std::string> cpp_standards = {"C++11", "C++14", "C++17",
+                                              "C++20", "C++23", "C++26"};
+    size_t std_idx =
+        promptChoice("Select C++ standard specification", cpp_standards, 4);
+    chosen_std = cpp_standards[std_idx];
+  } else {
+    std::vector<std::string> c_standards = {"C89", "C99", "C11", "C17", "C23"};
+    size_t std_idx =
+        promptChoice("Select C standard specification", c_standards, 2);
+    chosen_std = c_standards[std_idx];
+  }
 
   TemplateGen template_engine;
   auto raw_available = template_engine.getAvailableTemplates();
-
-  if (raw_available.empty()) {
-    return std::unexpected(
-        CliError{CliError::Code::GeneralFailure,
-                 "Template Engine Error: No embedded blueprint skeletons found "
-                 "inside the binary"});
+  std::string chosen_template = "default";
+  if (!raw_available.empty()) {
+    std::vector<std::string> available_templates;
+    for (const auto &[name, desc] : raw_available) {
+      available_templates.push_back(name + " (" + desc + ")");
+    }
+    std::sort(available_templates.begin(), available_templates.end());
+    size_t template_idx =
+        promptChoice("Select matching embedded layout blueprint template",
+                     available_templates, 0);
+    chosen_template = raw_available[template_idx].first;
   }
-
-  std::vector<std::string> available_templates;
-  for (const auto &[name, desc] : raw_available) {
-    available_templates.push_back(name + " (" + desc + ")");
-  }
-  std::sort(available_templates.begin(), available_templates.end());
-
-  size_t template_idx = promptChoice(
-      "Select Project Skeleton Blueprint:", available_templates, 0);
-
-  std::string chosen_template = raw_available[template_idx].first;
 
   std::vector<std::string> git_options = {"Yes", "No"};
   size_t git_idx = promptChoice(
-      "Initialize empty local Git version control tree?", git_options, 0);
+      "Initialize default git repository control index?", git_options, 0);
   bool init_git = (git_idx == 0);
 
-  std::print(
-      "\n{}⠋ Spawning environment scaffolding from embedded memory...{}\r",
-      Style::Dim, Style::Reset);
+  std::print("\nSpawning project workspace layout...\r");
   std::fflush(stdout);
 
+  std::string std_for_creation = (chosen_lang == "C++") ? chosen_std : "c++23";
+  std::transform(std_for_creation.begin(), std_for_creation.end(),
+                 std_for_creation.begin(), ::tolower);
+
   if (!template_engine.create(chosen_template, target_dir, project_name,
-                              chosen_cpp)) {
-    return std::unexpected(
-        CliError{CliError::Code::ProjectCreationDenied,
-                 "Template Generation Error: Failed writing static embedded "
-                 "assets to storage directory."});
+                              std_for_creation)) {
+    return std::unexpected(CliError{
+        CliError::Code::ProjectCreationDenied,
+        "Failed writing blueprint layout template files to target path."});
   }
 
   if (init_git) {
     std::unordered_map<std::string, std::string> clean_env;
     OS::ExecuteCommand("git init --initial-branch=main " + target_dir.string(),
                        clean_env);
+    std::ofstream gitignore(target_dir / ".gitignore");
+    if (gitignore.is_open()) {
+      gitignore << "build/\n"
+                << "obj/\n"
+                << ".mokai/\n"
+                << "compile_commands.json\n"
+                << "*.o\n"
+                << "*.obj\n"
+                << "*.a\n"
+                << "*.lib\n"
+                << "*.so\n"
+                << "*.dll\n"
+                << "*.dylib\n"
+                << "*.exe\n"
+                << "*.d\n"
+                << ".vscode/\n"
+                << ".vs/\n"
+                << "out/\n";
+      gitignore.close();
+    }
   }
 
-  std::println("\r{}{}Project setup initialized perfectly!{}", Style::Green,
-               Style::Success, Style::Reset);
+  fs::path toml_path = target_dir / "mokai.toml";
+  if (fs::exists(toml_path)) {
+    std::ifstream toml_in(toml_path);
+    if (toml_in.is_open()) {
+      std::stringstream ss;
+      ss << toml_in.rdbuf();
+      std::string content = ss.str();
+      toml_in.close();
+
+      std::string std_val = chosen_std;
+      std::transform(std_val.begin(), std_val.end(), std_val.begin(),
+                     ::tolower);
+
+      if (chosen_lang == "C++") {
+        size_t cpp_pos = content.find("cpp_version =");
+        if (cpp_pos != std::string::npos) {
+          size_t end_line = content.find('\n', cpp_pos);
+          if (end_line != std::string::npos) {
+            content.replace(cpp_pos, end_line - cpp_pos,
+                            std::format("cpp_version = \"{}\"", std_val));
+          }
+        } else {
+          size_t proj_pos = content.find("[project]");
+          if (proj_pos != std::string::npos) {
+            content.insert(proj_pos + 9,
+                           std::format("\ncpp_version = \"{}\"", std_val));
+          }
+        }
+      } else {
+        size_t c_pos = content.find("c_version =");
+        if (c_pos != std::string::npos) {
+          size_t end_line = content.find('\n', c_pos);
+          if (end_line != std::string::npos) {
+            content.replace(c_pos, end_line - c_pos,
+                            std::format("c_version = \"{}\"", std_val));
+          }
+        } else {
+          size_t proj_pos = content.find("[project]");
+          if (proj_pos != std::string::npos) {
+            content.insert(proj_pos + 9,
+                           std::format("\nc_version = \"{}\"", std_val));
+          }
+        }
+      }
+
+      std::ofstream toml_out(toml_path);
+      if (toml_out.is_open()) {
+        toml_out << content;
+        toml_out.close();
+      }
+    }
+  }
+
+  Log::Success("Project workspace generated successfully.");
   std::println("");
-  std::println("  {}Location:   {} {}", Style::Dim, Style::Reset,
+  std::println("  {}Location:        {}{}", Color::Violet, Color::Reset,
                target_dir.string());
-  std::println("  Navigate and trigger production builds via:");
-  std::println("  {}cd {}{}", Style::Cyan, project_name, Style::Reset);
-  std::println("  {}mokai build{}", Style::Cyan, Style::Reset);
+  std::println("  {}Language Family: {}{}", Color::Violet, Color::Reset,
+               chosen_lang);
+  std::println("  {}Specification:   {}{}", Color::Violet, Color::Reset,
+               chosen_std);
+  std::println("  {}Template:        {}{}", Color::Violet, Color::Reset,
+               chosen_template);
+  std::println("");
+  std::println("  Navigate and trigger a compilation build via:");
+  std::println("  {}cd {}{}", Color::Cyan, project_name, Color::Reset);
+  std::println("  {}mokai build{}", Color::Cyan, Color::Reset);
 
   return {};
 }
 
 void Cli::logSupportedCommands() {
-  for (const auto &command : m_supported_commands) {
-    std::println("    {}{}• {}{}", Style::Green, Style::Reset, command.first,
-                 Style::Reset);
-  }
-  std::println("");
+  std::println("Commands:");
+  auto print_cmd = [](std::string_view name, std::string_view desc) {
+    std::println("  {}{:<10}{} - {}", Color::Violet, name, Color::Reset, desc);
+  };
+
+  print_cmd("add", "Adds a registry or local path dependency to mokai.toml.");
+  print_cmd("build", "Compiles all dependencies and targets in parallel.");
+  print_cmd("create", "Scaffolds a clean C++ workspace directory.");
+  print_cmd("help", "Displays usage and details for build commands.");
+  print_cmd("run", "Builds and executes a target binary.");
+  print_cmd("version", "Displays the current release version.");
 }
 
 } // namespace mokai

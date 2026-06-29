@@ -2,7 +2,6 @@
 #include "config/toml.hpp"
 #include "core/os.hpp" // Added to enable platform-specific manifest validation matching
 #include "graph/types.hpp"
-#include "log/log.h"
 #include <expected>
 #include <memory>
 #include <string>
@@ -27,7 +26,6 @@ public:
   }
 
 private:
-  log::Logger m_logger;
   std::string m_file_content;
   toml::table m_config_toml;
   ProjectManifest m_manifest;

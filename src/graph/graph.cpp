@@ -2,12 +2,14 @@
 #include "cli/cli.hpp"
 #include "graph/compiler/tool_chain_finder.hpp"
 #include "graph/types.hpp"
+#include "log/log.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <memory>
 #include <regex>
@@ -29,14 +31,17 @@ extern char **environ;
 namespace fs = std::filesystem;
 
 namespace mokai {
+
 int Graph::executeCommandFast(const std::vector<std::string> &args) {
   return executeCommandFast(args, "");
 }
 
 int Graph::executeCommandFast(const std::vector<std::string> &args,
                               const std::string &redirectStdoutTo) {
-  if (args.empty())
+  if (args.empty()) {
     return -1;
+  }
+
 #ifdef _WIN32
   std::string cmdLine;
   bool pipestdout = false;
@@ -47,7 +52,6 @@ int Graph::executeCommandFast(const std::vector<std::string> &args,
     cmdLine += (i > 0 ? " \"" : "\"") + args[i] + "\"";
   }
 
-  // Pipe handles
   HANDLE hRead = nullptr, hWrite = nullptr;
   SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
   STARTUPINFOA si;
@@ -57,8 +61,9 @@ int Graph::executeCommandFast(const std::vector<std::string> &args,
   si.cb = sizeof(si);
 
   if (pipestdout) {
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
       return -1;
+    }
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
     si.dwFlags |= STARTF_USESTDHANDLES;
@@ -69,29 +74,31 @@ int Graph::executeCommandFast(const std::vector<std::string> &args,
 
   if (!CreateProcessA(nullptr, &cmdLine[0], nullptr, nullptr, TRUE, 0, nullptr,
                       nullptr, &si, &pi)) {
-    if (hRead)
+    if (hRead) {
       CloseHandle(hRead);
-    if (hWrite)
+    }
+    if (hWrite) {
       CloseHandle(hWrite);
+    }
     return -1;
   }
 
-  if (pipestdout)
+  if (pipestdout) {
     CloseHandle(hWrite);
+  }
 
-  // Wait for process
   WaitForSingleObject(pi.hProcess, INFINITE);
   DWORD exitCode = 0;
   GetExitCodeProcess(pi.hProcess, &exitCode);
 
-  // Capture stdout if requested
   if (pipestdout && !redirectStdoutTo.empty()) {
     std::ofstream outFile(redirectStdoutTo);
     char buffer[4096];
     DWORD bytesRead;
     while (ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, nullptr)) {
-      if (bytesRead == 0)
+      if (bytesRead == 0) {
         break;
+      }
       buffer[bytesRead] = '\0';
       outFile << buffer;
     }
@@ -135,8 +142,9 @@ int Graph::executeCommandFast(const std::vector<std::string> &args,
 std::string Graph::escapeJsonString(const std::string &input) {
   std::string output;
   for (char c : input) {
-    if (c == '\\' || c == '"')
+    if (c == '\\' || c == '"') {
       output += '\\';
+    }
     output += c;
   }
   return output;
@@ -145,8 +153,7 @@ std::string Graph::escapeJsonString(const std::string &input) {
 std::expected<Graph, std::string>
 Graph::Create(std::shared_ptr<ProjectManifest> rootManifest,
               const GlobalOptions &options) {
-  mokai::log::Logger init_logger;
-  ToolchainFinder finder(init_logger);
+  ToolchainFinder finder;
   auto result = finder.discover(options.default_compiler);
 
   if (!result) {
@@ -157,7 +164,7 @@ Graph::Create(std::shared_ptr<ProjectManifest> rootManifest,
 
 Graph::Graph(std::shared_ptr<ProjectManifest> rootManifest,
              const GlobalOptions &options, std::unique_ptr<ICompiler> compiler)
-    : m_root_manifest(std::move(rootManifest)), m_options(options), m_logger(),
+    : m_root_manifest(std::move(rootManifest)), m_options(options),
       m_conditionEngine(std::make_unique<ConditionEngine>()),
       m_compiler(std::move(compiler)) {
   loadSourcesCache();
@@ -176,17 +183,20 @@ std::string Graph::getSourcesCachePath() const {
 
 void Graph::loadSourcesCache() {
   std::string src_cache = getSourcesCachePath();
-  if (!fs::exists(src_cache) || m_options.force_rebuild)
+  if (!fs::exists(src_cache) || m_options.force_rebuild) {
     return;
+  }
 
   std::ifstream file(src_cache, std::ios::binary);
-  if (!file.is_open())
+  if (!file.is_open()) {
     return;
+  }
 
   size_t total_targets = 0;
   if (!(file.read(reinterpret_cast<char *>(&total_targets),
-                  sizeof(total_targets))))
+                  sizeof(total_targets)))) {
     return;
+  }
 
   for (size_t i = 0; i < total_targets; ++i) {
     size_t qn_len = 0;
@@ -218,8 +228,9 @@ void Graph::loadSourcesCache() {
 void Graph::saveSourcesCache() {
   fs::create_directories("./.mokai");
   std::ofstream file(getSourcesCachePath(), std::ios::binary);
-  if (!file.is_open())
+  if (!file.is_open()) {
     return;
+  }
 
   size_t total_targets = m_resolvedSourcesCache.size();
   file.write(reinterpret_cast<const char *>(&total_targets),
@@ -249,8 +260,9 @@ void Graph::saveSourcesCache() {
 
 void Graph::populateRegistry(std::shared_ptr<ProjectManifest> manifest,
                              const std::string_view path_prefix) {
-  if (!manifest || m_processedManifests.contains(manifest.get()))
+  if (!manifest || m_processedManifests.contains(manifest.get())) {
     return;
+  }
   m_processedManifests.insert(manifest.get());
 
   fs::path tomlPath = fs::path(manifest->base_dir) / "mokai.toml";
@@ -267,8 +279,10 @@ void Graph::populateRegistry(std::shared_ptr<ProjectManifest> manifest,
     std::string qn = generateQualifiedName(path_prefix, target.name);
 
     if (m_targetRegistry.contains(qn)) {
-      m_logger.Error("Duplicate qualified target name detected: '" + qn +
-                     "' in manifest location: " + manifest->base_dir);
+      Log::Error(std::format("Duplicate qualified target name detected: '{}' "
+                             "in manifest location: "
+                             "{}",
+                             qn, manifest->base_dir));
       throw std::runtime_error(
           "Mokai compilation halted: Target name collision on " + qn);
     }
@@ -290,8 +304,9 @@ void Graph::populateRegistry(std::shared_ptr<ProjectManifest> manifest,
         try {
           m_resolvedSourcesCache[qn] = resolveTargetSources(target, manifest);
         } catch (const std::exception &e) {
-          m_logger.Error("Failed to resolve target file components for '" + qn +
-                         "': " + e.what());
+          Log::Error(std::format(
+              "Failed to resolve target file components for '{}': {}", qn,
+              e.what()));
           continue;
         }
       }
@@ -324,8 +339,8 @@ const QualifiedTarget *
 Graph::FindByQualifiedName(const std::string &qualified_name) const {
   auto it = m_targetRegistry.find(qualified_name);
   if (it == m_targetRegistry.end()) {
-    m_logger.Warn("Queried non-existent build target token: '" +
-                  qualified_name + "'");
+    Log::Warn(std::format("Queried non-existent build target token: '{}'",
+                          qualified_name));
     return nullptr;
   }
   return &it->second;
@@ -342,9 +357,9 @@ std::vector<GraphEdge> Graph::buildEdges() {
           continue;
         }
         if (!m_targetRegistry.contains(to_name)) {
-          m_logger.Error("Target '" + qn +
-                         "' references a missing or unresolved dependency: '" +
-                         to_name + "'");
+          Log::Error(std::format(
+              "Target '{}' references a missing or unresolved dependency: '{}'",
+              qn, to_name));
           continue;
         }
         seen_dependencies.insert(to_name);
@@ -401,9 +416,10 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
       }
     }
     if (resolved.empty()) {
-      m_logger.Warn("Explicit dependency link reference '" + raw_dep +
-                    "' could not be mapped to any targets inside '" +
-                    from_target.qualifiedName + "'");
+      Log::Warn(std::format(
+          "Explicit dependency link reference '{}' could not be mapped to "
+          "any targets inside '{}'",
+          raw_dep, from_target.qualifiedName));
     }
     return resolved;
   }
@@ -430,9 +446,10 @@ Graph::resolveDependsOnEntry(const std::string &raw_dep,
   }
 
   if (resolved.empty()) {
-    m_logger.Error(
-        "Unresolved compilation unit dependency token discovered: '" + raw_dep +
-        "' requested by target node: '" + from_target.qualifiedName + "'");
+    Log::Error(std::format(
+        "Unresolved compilation unit dependency token discovered: '{}' "
+        "requested by target node: '{}'",
+        raw_dep, from_target.qualifiedName));
   }
   return resolved;
 }
@@ -451,9 +468,9 @@ void Graph::collectTransitive(const std::string &root_node,
 
   const QualifiedTarget *root_qt = FindByQualifiedName(root_node);
   if (!root_qt) {
-    m_logger.Error(
-        "Root target mapping missing during transitive collection: '" +
-        root_node + "'");
+    Log::Error(std::format(
+        "Root target mapping missing during transitive collection: '{}'",
+        root_node));
     return;
   }
 
@@ -465,8 +482,8 @@ void Graph::collectTransitive(const std::string &root_node,
     const QualifiedTarget *qt = FindByQualifiedName(frame.node);
 
     if (!qt) {
-      m_logger.Error("Target link broken during graph traversal loop: '" +
-                     frame.node + "'");
+      Log::Error(std::format(
+          "Target link broken during graph traversal loop: '{}'", frame.node));
       processing.erase(frame.node);
       stack.pop_back();
       continue;
@@ -485,9 +502,9 @@ void Graph::collectTransitive(const std::string &root_node,
       frame.dep_index++;
 
       if (processing.contains(dep_name)) {
-        m_logger.Error(
-            "Circular dependency chain detected involving target: '" +
-            dep_name + "'");
+        Log::Error(std::format(
+            "Circular dependency chain detected involving target: '{}'",
+            dep_name));
         continue;
       }
 
@@ -526,8 +543,9 @@ void Graph::matchGlobPattern(const std::string &pattern,
                              const std::string &base_dir,
                              std::vector<std::string> &matches) {
   std::string pat = pattern;
-  if (pat.starts_with("./"))
+  if (pat.starts_with("./")) {
     pat = pat.substr(2);
+  }
   std::replace(pat.begin(), pat.end(), '\\', '/');
 
   std::string rx = "^";
@@ -535,8 +553,9 @@ void Graph::matchGlobPattern(const std::string &pattern,
     if (pat[i] == '*' && i + 1 < pat.length() && pat[i + 1] == '*') {
       rx += ".*";
       i++;
-      if (i + 1 < pat.length() && pat[i + 1] == '/')
+      if (i + 1 < pat.length() && pat[i + 1] == '/') {
         i++;
+      }
     } else if (pat[i] == '*') {
       rx += "[^/]*";
     } else if (pat[i] == '?') {
@@ -555,13 +574,14 @@ void Graph::matchGlobPattern(const std::string &pattern,
     filter = std::regex(rx, std::regex_constants::ECMAScript |
                                 std::regex_constants::optimize);
   } catch (const std::regex_error &e) {
-    m_logger.Error("Malformed glob pattern regex translation: " + rx + " (" +
-                   e.what() + ")");
+    Log::Error(std::format("Malformed glob pattern regex translation: {} ({})",
+                           rx, e.what()));
     return;
   }
   std::string root = base_dir.empty() ? "." : base_dir;
-  if (!fs::exists(root))
+  if (!fs::exists(root)) {
     return;
+  }
 
   size_t dot_idx = pat.rfind('.');
   std::string target_ext = (dot_idx != std::string::npos &&
@@ -599,17 +619,16 @@ void Graph::matchGlobPattern(const std::string &pattern,
             }
           }
         } catch (const std::exception &e) {
-          m_logger.Warn(std::string("Skipping unreadable filesystem entry "
-                                    "during recursive glob: ") +
-                        e.what());
+          Log::Warn(std::format("Skipping unreadable filesystem entry during "
+                                "recursive glob: {}",
+                                e.what()));
         }
         ++it;
       }
     } catch (const std::exception &e) {
-      m_logger.Error(
-          std::string(
-              "Fatal error initializing recursive directory iterator: ") +
-          e.what());
+      Log::Error(std::format(
+          "Fatal error initializing recursive directory iterator: {}",
+          e.what()));
     }
   } else {
     try {
@@ -629,15 +648,13 @@ void Graph::matchGlobPattern(const std::string &pattern,
             }
           }
         } catch (const std::exception &ex) {
-          m_logger.Warn(
-              std::string("Skipping unreadable shallow directory entry: ") +
-              ex.what());
+          Log::Warn(std::format(
+              "Skipping unreadable shallow directory entry: {}", ex.what()));
         }
       }
     } catch (const std::exception &e) {
-      m_logger.Error(
-          std::string("Fatal error initializing shallow directory iterator: ") +
-          e.what());
+      Log::Error(std::format(
+          "Fatal error initializing shallow directory iterator: {}", e.what()));
     }
   }
 }
@@ -657,8 +674,9 @@ Graph::resolveTargetSources(const Target &target,
       std::string_view gn = std::string_view(s).substr(1);
       for (const auto &fg : manifest->file_groups) {
         if (fg.name == gn) {
-          for (const auto &p : fg.patterns)
+          for (const auto &p : fg.patterns) {
             matchGlobPattern(p, b, res);
+          }
           break;
         }
       }
@@ -666,12 +684,14 @@ Graph::resolveTargetSources(const Target &target,
       matchGlobPattern(s, b, res);
     } else {
       std::string_view c = s;
-      if (c.starts_with("./"))
+      if (c.starts_with("./")) {
         c = c.substr(2);
+      }
 
       fs::path p = fs::path(b) / std::string(c);
-      if (fs::exists(p) && fs::is_regular_file(p))
+      if (fs::exists(p) && fs::is_regular_file(p)) {
         res.push_back(p.lexically_normal().string());
+      }
     }
   }
 
@@ -684,21 +704,26 @@ std::vector<std::string>
 Graph::computeBuildOrder(const std::vector<GraphEdge> &edges) {
   std::vector<std::string> order;
   std::unordered_map<std::string, std::vector<std::string>> adj;
-  for (const auto &e : edges)
+  for (const auto &e : edges) {
     adj[e.from].push_back(e.to);
+  }
   std::unordered_map<std::string, NodeState> states;
-  for (auto const &[qn, qt] : m_targetRegistry)
+  for (auto const &[qn, qt] : m_targetRegistry) {
     states[qn] = NodeState::Unvisited;
+  }
   auto dfs = [&](auto &self, const std::string &n) -> bool {
     states[n] = NodeState::Visiting;
     if (adj.count(n)) {
       for (const auto &d : adj[n]) {
-        if (!states.count(d))
+        if (!states.count(d)) {
           continue;
-        if (states[d] == NodeState::Visiting)
+        }
+        if (states[d] == NodeState::Visiting) {
           return false;
-        if (states[d] == NodeState::Unvisited && !self(self, d))
+        }
+        if (states[d] == NodeState::Unvisited && !self(self, d)) {
           return false;
+        }
       }
     }
     states[n] = NodeState::Done;
@@ -706,8 +731,9 @@ Graph::computeBuildOrder(const std::vector<GraphEdge> &edges) {
     return true;
   };
   for (auto const &[qn, qt] : m_targetRegistry) {
-    if (states[qn] == NodeState::Unvisited && !dfs(dfs, qn))
+    if (states[qn] == NodeState::Unvisited && !dfs(dfs, qn)) {
       return {};
+    }
   }
   return order;
 }
@@ -733,8 +759,9 @@ void Graph::executeHooks(const std::shared_ptr<ProjectManifest> &manifest,
                          HookTrigger trigger, const std::string &target_name) {
   for (const auto &hook : manifest->hooks) {
     if (hook.trigger != trigger ||
-        (hook.target.has_value() && hook.target.value() != target_name))
+        (hook.target.has_value() && hook.target.value() != target_name)) {
       continue;
+    }
     std::string ts = triggerToString(trigger);
     fs::path cp =
         fs::temp_directory_path() / ("mokai_hook_ctx_" + hook.name + ".json");

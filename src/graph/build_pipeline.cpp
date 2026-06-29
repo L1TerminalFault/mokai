@@ -1,6 +1,6 @@
 #include "graph.hpp"
 #include "graph/compiler/icompiler.hpp"
-#include "telemetry/log.hpp"
+#include "log/log.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -8,10 +8,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <mutex>
-#include <ostream>
-#include <print>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -27,7 +24,6 @@ namespace mokai {
 class Graph::BuildPipeline {
 private:
   std::atomic<int> m_total_compile_tasks{0};
-  std::mutex m_log_mutex;
   struct DirtyInfo {
     bool needsRecomp;
     std::time_t lastTimeStamp;
@@ -83,13 +79,15 @@ public:
 
   ~BuildPipeline() { stopWorkers(); }
 
+  int get_compiled_count() const { return m_total_compile_tasks.load(); }
+
   bool execute() {
     if (m_order.empty())
       return true;
     if (!m_graph.m_compiler)
       return false;
 
-    mokai::PerfTimer timer;
+    PerfTimer timer;
 
     {
       fs::create_directories(m_obj_dir);
@@ -104,8 +102,7 @@ public:
 
     if (!m_needs_any_work && !m_graph.m_options.force_rebuild) {
       if (m_graph.m_options.verbosity != Verbosity::Quiet) {
-        std::print("\033[32m[ INFO  ]\033[0m Build system synchronized: zero "
-                   "units dirty.\n");
+        Log::Success("Build system synchronized: zero units dirty.");
       }
       return true;
     }
@@ -121,8 +118,6 @@ public:
     timer.Mark("Pipeline: Graph Setup");
 
     {
-      std::print("\033[32m[ INFO  ]\033[0m Dispatching build pipeline...\n");
-
       std::unique_lock<std::mutex> lock(m_state_mutex);
       while (m_finished_targets < m_total_targets && !m_failed) {
         processReadyTargets();
@@ -143,15 +138,8 @@ public:
     timer.Mark("Pipeline: Worker Execution Loop");
 
     if (m_failed) {
-      std::print("\033[31m[ ERROR ]\033[0m Build pipeline failed: Compiler "
-                 "exited non-zero.\n");
+      Log::Error("Build pipeline failed: Compiler exited non-zero.");
       return false;
-    }
-
-    if (m_total_compile_tasks.load() > 0) {
-      std::print("\033[32m[ INFO  ]\033[0m All targets linked. {} files "
-                 "compiled cleanly.\n",
-                 m_total_compile_tasks.load());
     }
 
     saveStateCache();
@@ -205,7 +193,6 @@ private:
   }
 
   void computeDirtyTargets() {
-    std::cerr << "compute dirty targets" << std::endl;
     m_needs_any_work = false;
     for (const auto &qn : m_order) {
       const auto *qt = m_graph.FindByQualifiedName(qn);
@@ -231,7 +218,7 @@ private:
               m_state_cache[src].first !=
                   m_graph.getNormalizedFileTimestamp(src) ||
               headerDirty(obj_path)) {
-            std::cerr << "marked dirty" << std::endl;
+            Log::Debug(std::format("Target marked dirty: {}", src));
             dirty = true;
             break;
           }
@@ -281,16 +268,14 @@ private:
           auto &ctx = item.first;
           auto &task = item.second;
 
-          {
-            std::lock_guard<std::mutex> lock(m_log_mutex);
-            std::print("\033[0m[ BUILD ]\033[0m Compiling {}\n",
+          int current = m_completed_tasks.load() + 1;
+          int total = m_total_compile_tasks.load();
+          Log::Compile(current, total,
                        fs::path(task.source).filename().string());
-          }
+
           if (!task.build_args) {
-            std::lock_guard<std::mutex> lock(m_log_mutex);
-            std::print("\033[31m[ ERROR ]\033[0m Task {} has null build "
-                       "arguments! Skipping.\n",
-                       task.source);
+            Log::Error(std::format(
+                "Task {} has null build arguments! Skipping.", task.source));
             ctx->failed = true;
             m_failed = true;
             m_cv.notify_one();
@@ -493,7 +478,7 @@ private:
         return candidate;
     }
 
-    return p; // TODO: revisit this is probably not perfect
+    return p;
   }
 
   bool headerDirty(const std::string &objPath) {
@@ -505,6 +490,7 @@ private:
     }
     return false;
   }
+
   std::vector<std::string> parseDependencyHeaders(const std::string &objPath) {
     std::vector<std::string> headers;
     std::string depFile = fs::path(objPath).replace_extension(".d").string();
@@ -517,9 +503,6 @@ private:
     while (in >> token) {
       if (token == "\\")
         continue;
-      // First token is always the target (the .o itself, with a trailing ':'),
-      // never a header — skip it explicitly rather than relying on the
-      // "file does not exist" fallback to filter it out.
       if (first) {
         first = false;
         continue;
@@ -563,9 +546,8 @@ private:
         std::lock_guard<std::mutex> lock(m_queue_mutex);
         for (size_t i = 0; i < m_graph.m_resolvedSourcesCache[cr].size(); ++i) {
           std::string s = m_graph.m_resolvedSourcesCache[cr][i];
-          std::string ext = m_graph.m_compiler->getObjExtension(); // .o or .obj
+          std::string ext = m_graph.m_compiler->getObjExtension();
           std::string flattened = fs::relative(s, m_working_dir).string();
-          // replace with _
           for (char &c : flattened) {
             if (c == '/' || c == '\\' || c == ' ' || c == ':')
               c = '_';
@@ -660,11 +642,8 @@ private:
       }
     }
 
-    {
-      std::lock_guard<std::mutex> lock(m_log_mutex);
-      std::print("\033[36m[ LINK  ]\033[0m {}\n",
-                 fs::path(out_file).filename().string());
-    }
+    Log::Info(
+        std::format("Linking {}", fs::path(out_file).filename().string()));
 
     return m_graph.executeCommandFast(lk_args) == 0;
   }
@@ -771,7 +750,14 @@ bool Graph::BuildAllTree(const std::vector<std::string> &build_order) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::high_resolution_clock::now() - start_time)
                         .count();
-    std::print("\033[32m[ INFO  ]\033[0m Build complete in {} ms.\n", duration);
+    int compiled = pipeline.get_compiled_count();
+    if (compiled > 0) {
+      Log::Success(std::format("Build completed in {} ms ({} {} compiled).",
+                               duration, compiled,
+                               compiled == 1 ? "file" : "files"));
+    } else {
+      Log::Success(std::format("Build completed in {} ms.", duration));
+    }
   }
   return true;
 }

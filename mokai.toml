@@ -10,7 +10,6 @@ sources = [
     "src/graph/**/*.cpp", 
     "src/utils/**/*.cpp",
     "src/cli/**/*.cpp",
-    "src/log/**/*.cpp",
     "src/templates/**/*.cpp",
     "src/core/**/*.cpp",
 ]
