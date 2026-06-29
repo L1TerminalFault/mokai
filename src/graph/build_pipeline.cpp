@@ -5,13 +5,18 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <mutex>
+#include <ostream>
 #include <print>
 #include <queue>
 #include <sstream>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -23,6 +28,13 @@ class Graph::BuildPipeline {
 private:
   std::atomic<int> m_total_compile_tasks{0};
   std::mutex m_log_mutex;
+  struct DirtyInfo {
+    bool needsRecomp;
+    std::time_t lastTimeStamp;
+    std::string reason;
+  };
+  std::unordered_map<std::string, DirtyInfo> dirtySources;
+  std::vector<std::string> include_dirs;
 
 public:
   struct Task {
@@ -193,6 +205,7 @@ private:
   }
 
   void computeDirtyTargets() {
+    std::cerr << "compute dirty targets" << std::endl;
     m_needs_any_work = false;
     for (const auto &qn : m_order) {
       const auto *qt = m_graph.FindByQualifiedName(qn);
@@ -204,9 +217,21 @@ private:
 
       if (!dirty) {
         for (const auto &src : m_graph.m_resolvedSourcesCache[qn]) {
+          std::string ext = m_graph.m_compiler->getObjExtension();
+          std::string flattened = fs::relative(src, m_working_dir).string();
+          for (char &c : flattened) {
+            if (c == '/' || c == '\\' || c == ' ' || c == ':')
+              c = '_';
+          }
+          std::string obj_path =
+              (fs::path(m_obj_dir) / qt->target.name / (flattened + ext))
+                  .string();
+
           if (!m_state_cache.count(src) ||
               m_state_cache[src].first !=
-                  m_graph.getNormalizedFileTimestamp(src)) {
+                  m_graph.getNormalizedFileTimestamp(src) ||
+              headerDirty(obj_path)) {
+            std::cerr << "marked dirty" << std::endl;
             dirty = true;
             break;
           }
@@ -292,7 +317,7 @@ private:
           for (const auto &arg : *task.build_args) {
             args.push_back(arg);
           }
-          if (0 && m_graph.m_compiler->getType() == CompilerType::MSVC) {
+          if (m_graph.m_compiler->getType() == CompilerType::MSVC) {
             if (m_graph.executeCommandFast(
                     args,
                     fs::path(task.output).replace_extension(".d").string()) !=
@@ -304,6 +329,10 @@ private:
               ctx->records.push_back(
                   {task.source, m_graph.getNormalizedFileTimestamp(task.source),
                    "-"});
+              for (const auto &hdr : parseDependencyHeaders(task.output)) {
+                ctx->records.push_back(
+                    {hdr, m_graph.getNormalizedFileTimestamp(hdr), "-"});
+              }
             }
           } else {
             if (m_graph.executeCommandFast(args) != 0) {
@@ -314,6 +343,10 @@ private:
               ctx->records.push_back(
                   {task.source, m_graph.getNormalizedFileTimestamp(task.source),
                    "-"});
+              for (const auto &hdr : parseDependencyHeaders(task.output)) {
+                ctx->records.push_back(
+                    {hdr, m_graph.getNormalizedFileTimestamp(hdr), "-"});
+              }
             }
           }
 
@@ -442,6 +475,62 @@ private:
     m_compilation_database_dirty = true;
   }
 
+  fs::path resolveHeaderPath(const std::string &token,
+                             const std::vector<std::string> &includeDirs,
+                             const fs::path &workingDir) {
+    fs::path p(token);
+
+    if (p.is_absolute() && fs::exists(p))
+      return p;
+
+    fs::path candidate = workingDir / p;
+    if (fs::exists(candidate))
+      return candidate;
+
+    for (const auto &inc : includeDirs) {
+      candidate = fs::path(inc) / p;
+      if (fs::exists(candidate))
+        return candidate;
+    }
+
+    return p; // TODO: revisit this is probably not perfect
+  }
+
+  bool headerDirty(const std::string &objPath) {
+    for (const auto &key : parseDependencyHeaders(objPath)) {
+      auto ts = m_graph.getNormalizedFileTimestamp(key);
+      auto it = m_state_cache.find(key);
+      if (it == m_state_cache.end() || it->second.first != ts)
+        return true;
+    }
+    return false;
+  }
+  std::vector<std::string> parseDependencyHeaders(const std::string &objPath) {
+    std::vector<std::string> headers;
+    std::string depFile = fs::path(objPath).replace_extension(".d").string();
+    if (!fs::exists(depFile))
+      return headers;
+
+    std::ifstream in(depFile);
+    std::string token;
+    bool first = true;
+    while (in >> token) {
+      if (token == "\\")
+        continue;
+      // First token is always the target (the .o itself, with a trailing ':'),
+      // never a header — skip it explicitly rather than relying on the
+      // "file does not exist" fallback to filter it out.
+      if (first) {
+        first = false;
+        continue;
+      }
+      fs::path resolved = resolveHeaderPath(token, include_dirs, m_working_dir);
+      if (fs::exists(resolved))
+        headers.push_back(resolved.lexically_normal().string());
+    }
+    return headers;
+  }
+
   void processReadyTargets() {
     while (!m_ready_queue.empty()) {
       std::string cr = m_ready_queue.front();
@@ -487,12 +576,18 @@ private:
 
           ctx->object_files[i] = o;
 
-          if (m_graph.m_options.force_rebuild || !m_state_cache.count(s) ||
-              m_state_cache[s].first != m_graph.getNormalizedFileTimestamp(s) ||
-              !fs::exists(o)) {
-
+          if (m_graph.m_options.force_rebuild || !fs::exists(o) ||
+              headerDirty(o) || !m_state_cache.count(s) ||
+              m_state_cache[s].first != m_graph.getNormalizedFileTimestamp(s)) {
             if (!lazy_init_done) {
               b_args = collectBuildFlags(qt, cr);
+              for (const auto &arg : *b_args) {
+                if (arg.rfind("-I", 0) == 0) {
+                  include_dirs.push_back(arg.substr(2));
+                } else if (arg.rfind("/I", 0) == 0) {
+                  include_dirs.push_back(arg.substr(2));
+                }
+              }
               generateCompilationDatabaseEntries(cr, qt, *b_args);
               lazy_init_done = true;
             }
