@@ -1,203 +1,171 @@
 # =======================================================================
-# MOKAI BUILD ENGINE — OFFICIAL SPECIFICATION AND SYSTEM DOCUMENTATION
+# MOKAI BUILD ENGINE — SPECIFICATION
 # =======================================================================
-# This manifest maps out 100% of the nodes, types, and variables parsed
-# natively by `mokai::Config` via toml11 and evaluated by the `Graph` layer.
-# All paths are strictly resolved relative to the containing file's `base_dir`.
+# Single dependency: toml11. All paths resolve relative to the containing
+# file's base_dir.
 
 # -----------------------------------------------------------------------
-# 1. ROOT PROJECT MANIFEST
+# 1. PROJECT
 # -----------------------------------------------------------------------
-# Context block initializing workspace metadata and core language standards.
 [project]
-name = "my_project"                  # Required. Unique string token identifying the package.
-version = "1.0.0"                    # Optional baseline version fallback literal.
-license = "MIT"                      # Optional string metadata.
-description = "High-performance creative tools" # Optional string metadata.
-homepage = "https://github.com/user/repo"   # Optional string metadata.
-
-# Standard selection. Parsed against a strict known runtime array:
-# Valid fields: 'c++11', 'c++14', 'c++17', 'c++20', 'c++23', 'c++26'.
-# Omission defaults execution to 'c++23'.
-cpp_version = "c++23"
-
-# Dynamic Versioning Rule
-# Instructs config parser to read a target path line-by-line and run a 
-# single-line regex search to mathematically extract major/minor/patch metrics.
+name = "my_project"                  # Required.
+version = "1.0.0"                    # Optional.
+license = "MIT"                      # Optional.
+description = "High-performance creative tools"
+homepage = "https://github.com/user/repo"
+cpp_version = "c++23"                # Default if omitted: c++23.
 version_from = { file = "include/version.h", pattern = "VERSION_ID ([0-9]+)" }
-
-# String Arrays
 authors = ["Baba"]
-include_dirs = ["include", "src/core/include"] # Global paths appended to all baseline translation units.
+include_dirs = ["include", "src/core/include"]
 
-# Local & Remote Package Manifest Routing
-# Sourced and routed using explicit path prefix scoping:
-#   - Local Paths: Must begin with `./` or `../`. Checked via `Config::isLocDep()`.
-#   - Remote Repositories: Must begin with the `git:` scheme suffix. Checked via `Config::isGitDep()`.
+# Local: "./" or "../" prefix. Remote: "git:" prefix.
 dependencies = [
-    "./local/sub_module",                  
-    "git:https://github.com/fmtlib/fmt.git"
+    "./local/sub_module",
+    "git:https://github.com/fmtlib/fmt.git",
 ]
 
-
 # -----------------------------------------------------------------------
-# 2. GLOBAL OPTION TOGGLES
+# 2. OPTIONS — boolean toggles, read via `options.<key>` in conditions
 # -----------------------------------------------------------------------
-# Project-level option tables. Keys can use any alphanumeric identifier.
-# Values MUST strictly be booleans (true/false) to populate the engine variable database.
-# Evaluated in `condition` strings via the `options.<key>` syntax scope.
 [options]
 BUILD_VULKAN_BACKEND = true
 ENABLE_TELEMETRY = false
 
-
 # -----------------------------------------------------------------------
-# 3. COMPATIBILITY MATRIX
+# 3. EXPORT CONTRACT — what a consumer gets when this project is a dependency
 # -----------------------------------------------------------------------
-# Gating boundaries parsed into internal validation containers to drop out 
-# execution tracking before starting pipeline generation loops if environment is wrong.
+# NOTE: This is intentionally narrow. It is NOT environment validation
+# (that's what the condition engine in [[block]] is for — see §5). This
+# section answers exactly one question: "if another project depends on
+# me, what C++ version does that consumer get built against?"
 [compatibility]
 min_cpp_version = "c++20"
 preferred_cpp_version = "c++23"
-unsupported_cpp_versions = ["c++11", "c++14"]
-
-[compatibility.compilers]
-supported = ["clang", "gcc"]
-unsupported = ["msvc"]
-
+# MARK (kept from original, judgment call): if you never plan to be
+# depended on by another mokai project, this whole section is droppable.
+# Keeping it because static/shared libs commonly are dependency targets,
+# and a consumer needs to know the floor before depends_on resolution.
 
 # -----------------------------------------------------------------------
-# 4. FILE GROUP ALIASING
+# 4. GROUPS — named, reusable sets of source patterns
 # -----------------------------------------------------------------------
-# Logical array tracking groups using TOML Array-of-Tables syntax (`[[file_group]]`).
-# Allows batching file wildcards into reusable tokens expanded via `matchGlobPattern`.
-[[file_group]]
+# Replaces the old `file_group`. Sources only — no flags/defines here,
+# that's what [[block]] is for (§5). One concept, one job.
+[[group]]
 name = "render_sources"
 patterns = ["src/renderer/*.cpp", "src/renderer/vulkan/**/*.cpp"]
 
-[[file_group]]
+[[group]]
 name = "shader_assets"
 patterns = ["shaders/**/*.spv"]
 
-
 # -----------------------------------------------------------------------
-# 5. PROPERTY GROUPS
+# 5. BLOCKS — conditional bundles of flags/defines/sources/deps/libs
 # -----------------------------------------------------------------------
-# Encapsulates matrices of flags, defines, and options. Stored inside the manifest
-# database array and referenced explicitly inside targets using the '@' prefix wrapper.
-[[property_group]]
+# Replaces property_group AND sources_if/flags_if/properties_if entirely.
+# One mechanism: a named block with an optional condition, carrying any
+# combination of the fields below. Reference it from a target with
+# `blocks = ["@name"]`, or declare one inline+anonymous directly under a
+# target (see §6) when it's only ever used once.
+#
+# Every field is optional — a block can be "just some flags", "just a
+# conditional dependency", or all of the above at once.
+[[block]]
 name = "linux_strict_diagnostics"
-condition = "os == linux && compiler == clang"  # Verified by condition engine before expanding
-defines = ["MOKAI_LINUX_BUILD=1", "DEBUG_GPU"]
+condition = "os == linux && compiler == clang"
 flags = ["-Wall", "-Wextra"]
+defines = ["MOKAI_LINUX_BUILD=1", "DEBUG_GPU"]
 
-
-# -----------------------------------------------------------------------
-# 6. LIFECYCLE INTERCEPTOR HOOKS
-# -----------------------------------------------------------------------
-# Registers shell pathways executed deterministically under explicit state boundaries.
-[[hook]]
-name = "shader_compiler"
-on = "pre_target_build"       # Mandatory. Triggers: 'pre_build', 'post_build', 'pre_target_build', 'post_target_build', 'file_change'
-run = "./scripts/compile_shaders.sh" # Mandatory. System command path executed via std::system
-target = "my_engine_core"     # Optional. Isolates hook execution to a single target unit
-pattern = "shaders/**/*.glsl" # Optional. Tracked path pattern for 'file_change' hashing checks
-
-
-# -----------------------------------------------------------------------
-# 7. TARGET EXECUTIONS MATRIX
-# -----------------------------------------------------------------------
-# Concrete compilation targets. Each entry adds a discrete unit to the pipeline graph.
-# 
-# PATH RESOLUTION INVARIANT (CRITICAL):
-# To prevent structural leakage during multi-package cross-compilation, all items found 
-# inside `sources`, `include_dirs`, and conditional `patterns` blocks MUST be combined with
-# the target manifest's parsed `base_dir` using `fs::path(b) / entry` before verification!
-[target.my_engine_core]
-type = "static_library"                     # Mandatory. Must evaluate to: 'executable', 'static_library', or 'shared_library'
-sources = ["src/main.cpp", "src/core.cpp"]  # Static un-globbed file arrays resolved directly.
-include_dirs = ["src/core/private"]         # Target-scoped lookup paths
-properties = ["@linux_strict_diagnostics"] # Injects named property_group definitions and flags
-flags = ["-O3", "-march=native"]            # Hardcoded compilation parameters
-system_libs = ["X11", "pthread", "dl", "m"] # Explicit system library linkage parameters passed straight to linker flag generation.
-
-# Dependency Resolution Rules (`depends_on`)
-# Resolves target coordinates via a sequential 5-step lookup loop:
-#   1. "package:target"  -> Maps to an explicit target inside a specific sub-manifest dependency.
-#   2. "package/profile" -> Imports a full clustered grouping of targets under an export profile.
-#   Local target name match inside the same file.
-#   4. Global unique target sweep across all gathered sub-manifest tracks.
-#   5. Package name match -> Fallback links to all defaults in `default_targets`.
-depends_on = [
-    "fmt",
-    "local_dep:module_target",
-    "external_dep/core_profile"
-]
-
-# --- Target Conditional Modifiers (_if Blocks) ---
-# Evaluated dynamically at pipeline scheduling. Arrays-of-tables allow multiples.
-# String expressions parsed inside `evaluateConditionExpression`.
-
-[[target.my_engine_core.sources_if]]
+[[block]]
+name = "vulkan_backend"
 condition = "options.BUILD_VULKAN_BACKEND == true"
-patterns = ["src/backend/vulkan.cpp", "src/backend/vulkan_pipeline.cpp"]
+sources = ["src/backend/vulkan.cpp", "src/backend/vulkan_pipeline.cpp"]
+depends_on = ["volk"]
 
-[[target.my_engine_core.flags_if]]
+[[block]]
+name = "telemetry_profiling"
 condition = "compiler == gcc && options.ENABLE_TELEMETRY == true"
 flags = ["-pg", "-fno-omit-frame-pointer"]
 
-[[target.my_engine_core.properties_if]]
+[[block]]
+name = "shared_export"
 condition = "target_type == shared_library"
 defines = ["MOKAI_CORE_EXPORT=1"]
 
-[[target.my_engine_core.properties_if]]
-condition = "options.BUILD_VULKAN_BACKEND == true"
-depends_on = ["volk"]
-
-
 # -----------------------------------------------------------------------
-# 8. CONFIGURATION GRAMMAR SPECIFICATION REFERENCE (FOR `condition` FIELDS)
+# 6. HOOKS
 # -----------------------------------------------------------------------
-# Condition string syntax parser evaluates tokens using specific keys:
-#
-# --- ENVIRONMENT STATE VARIABLES ---
-# `compiler`         : Evaluates toolchain binary ("clang", "gcc", "msvc").
-# `compiler_version` : Float/Semantic mathematical checks (e.g. >= 11.0, < 19.20).
-# `os`               : Matches host driving the build execution ("linux", "windows", "macos").
-# `target_os`        : Target system architecture being compiled for.
-# `arch`             : Native processor layout profile ("x86_64", "arm64", "x86").
-# `target_type`      : Active state of building block ("executable", "static_library", "shared_library").
-# `config`           : Maps active output profiles ("debug", "release", "profile").
-# `options.<key>`    : Custom keys configured under the global `[options]` block (true/false).
-#
-# --- LOGICAL OPERATORS ---
-# Logical Composition : `&&` (AND), `||` (OR)
-# Value Evaluation    : `==` (Equals), `!=` (Not Equals)
-# Numeric Comparisons : `>=`, `<=`, `>`, `<`
-
+# MARK (unchanged from original — out of scope for this pass, but see the
+# {{variable}} substitution proposal from earlier in this session: build_dir,
+# target_name, changed_file. Worth its own follow-up, not bundled here.)
+[[hook]]
+name = "shader_compiler"
+on = "pre_target_build"        # pre_build | post_build | pre_target_build | post_target_build | file_change
+run = "./scripts/compile_shaders.sh"
+target = "my_engine_core"
+pattern = "shaders/**/*.glsl"
 
 # -----------------------------------------------------------------------
-# 9. INTERFACE DISTRIBUTION LAYER
+# 7. TARGETS
 # -----------------------------------------------------------------------
-# Direct layout management defining how downstream packages consume this manifest when linked.
+[target.my_engine_core]
+type = "static_library"            # executable | static_library | shared_library
+sources = ["src/main.cpp", "src/core.cpp", "@render_sources"]  # literal, glob, or @group
+include_dirs = ["src/core/private"]
+flags = ["-O3", "-march=native"]
+system_libs = ["X11", "pthread", "dl", "m"]
+
+blocks = [
+    "@linux_strict_diagnostics",
+    "@vulkan_backend",
+    "@telemetry_profiling",
+    "@shared_export",
+]
+
+# Sequential 5-step lookup: package:target, package/profile,
+# local sibling, global sweep, package default_targets fallback.
+depends_on = [
+    "fmt",
+    "local_dep:module_target",
+    "external_dep/core_profile",
+]
+
+# Inline anonymous block — same schema as §5, just declared in place for
+# a one-off condition you don't need to name or reuse elsewhere.
+[[target.my_engine_core.block]]
+condition = "arch == arm64"
+flags = ["-mcpu=apple-m1"]
+
+# -----------------------------------------------------------------------
+# 8. CONDITION GRAMMAR
+# -----------------------------------------------------------------------
+# compiler, compiler_version, os, target_os, arch, target_type, config,
+# options.<key>
+# Operators: && || == != >= <= > 
+# MARK (added, not requested): the original spec showed no grouping
+# syntax. Worth confirming the condition engine actually supports
+# parens for `(a || b) && c` — if not, that's a real gap, flagged
+# during the earlier mokai/crow comparison too (crow has all/any/not()
+# composites; this grammar as documented doesn't show an equivalent).
+
+# -----------------------------------------------------------------------
+# 9. EXPORTS — how this project looks to a consumer
+# -----------------------------------------------------------------------
 [exports]
-default_targets = ["my_engine_core"] # Required if [exports] is declared. Links by default on raw package match.
+default_targets = ["my_engine_core"]
 include_dirs = ["include/public"]
 defines_required = ["USING_MOKAI_ENGINE=1"]
 defines_optional = ["MOKAI_ENABLE_ANALYTICS=1"]
 
-# Target clusters matching: depends_on = ["package/profile_name"]
 [exports.profile.headless_runtime]
 targets = ["my_engine_core"]
 
 [exports.profile.full_suite]
 targets = ["my_engine_core", "editor_companion_target"]
 
-
 # -----------------------------------------------------------------------
-# 10. ARTIFACT GENERATION LAYOUT
+# 10. OUTPUT
 # -----------------------------------------------------------------------
-# Alters physical final compilation tracking boundaries and target subfolders.
 [output]
 directory = "./build_output"
 

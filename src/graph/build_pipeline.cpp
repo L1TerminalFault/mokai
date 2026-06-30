@@ -440,9 +440,13 @@ private:
                                      const std::vector<std::string> &args) {
     for (const auto &src : m_graph.m_resolvedSourcesCache[qn]) {
       bool is_c = fs::path(src).extension() == ".c";
-      std::string cmd =
-          m_graph.m_compiler->getCompilerBinary(is_c) + " " +
-          m_graph.m_compiler->standardFlag(is_c ? "11" : "23", is_c);
+
+      std::string version_str = is_c ? qt->manifest->project.c_version
+                                     : qt->manifest->project.cpp_version;
+
+      std::string cmd = m_graph.m_compiler->getCompilerBinary(is_c) + " " +
+                        m_graph.m_compiler->standardFlag(version_str, is_c);
+
       for (const auto &arg : args)
         cmd += " " + arg;
       cmd += " " + m_graph.m_compiler->compileOnlyFlag() + " \"" + src + "\"";

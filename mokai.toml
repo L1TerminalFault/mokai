@@ -18,6 +18,10 @@ sources = [
 type = "executable"
 sources = ["src/entry.cpp"]
 depends_on = ["MOKAI"]
+flags = [
+    "-fno-exceptions",
+    "-fno-rtti"
+]
 
 [target.mokai_tests]
 type = "executable"

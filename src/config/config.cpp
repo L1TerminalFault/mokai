@@ -1,6 +1,6 @@
 #include "config.hpp"
 #include "cli/cli.hpp"
-#include "config/toml.hpp"
+#include "config/tom.hpp"
 #include "graph/types.hpp"
 #include "log/log.h"
 #include <algorithm>
@@ -11,6 +11,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -77,10 +78,9 @@ Config::Config(std::string workingDir, GlobalOptions &ops) {
     std::string hint = "Run 'mokai create' to scaffold a new workspace.";
     auto fuzzyFile = fuzzyFindCloseFile(config_path_str);
     if (fuzzyFile.found) {
-      hint = std::format(
-          "A similar file exists: '{}'. Check if the file is correctly named "
-          "'mokai.toml'.",
-          fs::path(fuzzyFile.best_match).filename().string());
+      hint = std::format("A similar file exists: '{}'. Check if the file is "
+                         "correctly named 'mokai.toml'.",
+                         fs::path(fuzzyFile.best_match).filename().string());
     }
     Log::Error(
         std::format("Missing project manifest file at location: '{}'\nHint: {}",
@@ -125,110 +125,58 @@ std::expected<void, std::string> Config::loadConfig(const std::string &path) {
 }
 
 std::expected<void, std::string> Config::parseConfig() {
-  try {
-    m_config_toml = toml::parse(m_file_content);
-  } catch (const toml::parse_error &e) {
-    auto source = e.source();
-    size_t target_line = source.begin.line;
-    size_t target_col = source.begin.column;
-
-    std::string source_line;
-    std::stringstream ss(m_file_content);
-    size_t current_line = 1;
-    while (std::getline(ss, source_line)) {
-      if (current_line == target_line) {
-        break;
-      }
-      current_line++;
-    }
-
-    int caret_len = 1;
-    if (source.end.line == target_line && source.end.column > target_col) {
-      caret_len = static_cast<int>(source.end.column - target_col);
-    }
-
-    Log::Error("Failed to parse project manifest (syntax error).");
-    Log::ErrorInline({source_line, e.description(),
-                      static_cast<int>(target_line),
-                      static_cast<int>(target_col - 1), caret_len});
-
-    return std::unexpected("");
-  }
+  // Use your streamlined flat parser instead of external library logic
+  m_parser.parse(m_file_content);
   return {};
 }
 
 std::expected<void, std::string>
 Config::extractProjectData(GlobalOptions &ops) {
-  auto extract_string_array = [](auto &&node_view,
-                                 std::vector<std::string> &dest) {
-    if (auto *arr = node_view.as_array()) {
-      for (auto &&el : *arr) {
-        if (auto val = el.template value<std::string>()) {
-          dest.push_back(*val);
-        }
-      }
-    }
-  };
-
   ProjectMetadata metadata;
-  toml::node_view<toml::node> projectTable = m_config_toml["project"];
+  bool has_project_header = false;
 
-  if (!projectTable.is_table()) {
-    return std::unexpected(
-        "Missing required [project] header inside the configuration file.");
-  }
+  // Track uniquely indexed vectors/maps inside structures to assemble object
+  // groupings dynamically
+  struct TargetBuildState {
+    std::string name;
+    Target tgt;
+  };
+  struct HookBuildState {
+    std::string name;
+    Hook h;
+  };
+  std::vector<TargetBuildState> raw_targets;
+  std::vector<HookBuildState> raw_hooks;
 
-  metadata.name = projectTable["name"].value_or("");
-  if (metadata.name.empty()) {
-    return std::unexpected("Required field 'name' is missing or empty from the "
-                           "[project] configuration.");
-  }
-
-  metadata.version = projectTable["version"].value_or("");
-  metadata.license = projectTable["license"].value_or("");
-  metadata.description = projectTable["description"].value_or("");
-  metadata.homepage = projectTable["homepage"].value_or("");
-  metadata.default_target = projectTable["default_target"].value_or("");
-  ops.default_compiler = projectTable["default_compiler"].value_or("");
-
-  if (ops.default_compiler.empty()) {
-    ops.default_compiler = projectTable["default_compiler"].value_or("");
-  }
-
-  if (auto *vf_table = projectTable["version_from"].as_table()) {
-    VersionFromSpec vf;
-    vf.file = (*vf_table)["file"].value_or("");
-    vf.pattern = (*vf_table)["pattern"].value_or("");
-    metadata.version_from = std::move(vf);
-  }
-
-  auto cppversion = projectTable["cpp_version"].value<std::string>();
-  static const std::vector<std::string> known_versions{
-      "c++11", "c++14", "c++17", "c++20", "c++23", "c++26"};
-  metadata.cpp_version = cppversion.value_or("c++23");
-  if (!std::ranges::contains(known_versions, metadata.cpp_version)) {
-    return std::unexpected(std::format("Unsupported C++ standard version: '{}'",
-                                       metadata.cpp_version));
-  }
-
-  static const std::vector<std::string> known_c_versions{"c89", "c90", "c99",
-                                                         "c11", "c17", "c23"};
-
-  auto cversion = projectTable["c_version"].value<std::string>();
-  metadata.c_version = cversion.value_or("c11");
-  if (!std::ranges::contains(known_c_versions, metadata.c_version)) {
-    return std::unexpected(std::format("Unsupported C standard version: '{}'",
-                                       metadata.c_version));
-  }
-
-  extract_string_array(projectTable["authors"], metadata.authors);
-  extract_string_array(projectTable["include_dirs"], metadata.include_dirs);
-  auto depTable = projectTable["dependencies"];
-
-  if (auto *arr = depTable.as_array()) {
-    for (auto &&el : *arr) {
-      if (auto val = el.value<std::string>()) {
-        std::string depStr = *val;
+  // Loop through fields generated by your custom parser
+  for (const auto &field : m_parser.fields) {
+    // 1. Root [project] parsing logic
+    if (field.scope == "project") {
+      has_project_header = true;
+      if (field.key == "name")
+        metadata.name = field.value;
+      else if (field.key == "version")
+        metadata.version = field.value;
+      else if (field.key == "license")
+        metadata.license = field.value;
+      else if (field.key == "description")
+        metadata.description = field.value;
+      else if (field.key == "homepage")
+        metadata.homepage = field.value;
+      else if (field.key == "default_target")
+        metadata.default_target = field.value;
+      else if (field.key == "default_compiler")
+        ops.default_compiler = field.value;
+      else if (field.key == "cpp_version")
+        metadata.cpp_version = field.value;
+      else if (field.key == "c_version")
+        metadata.c_version = field.value;
+      else if (field.key == "authors")
+        metadata.authors.push_back(field.value);
+      else if (field.key == "include_dirs")
+        metadata.include_dirs.push_back(field.value);
+      else if (field.key == "dependencies") {
+        std::string depStr = field.value;
         metadata.dependencies.push_back(depStr);
 
         if (isLocDep(depStr)) {
@@ -245,9 +193,8 @@ Config::extractProjectData(GlobalOptions &ops) {
           fs::path canonical_path = fs::canonical(dep_path);
           Config depconfig(canonical_path.string(), ops);
           DependencySpec spec{depStr, ""};
-          m_manifest.resolved_dependencies[depStr] =
-              ResolvedDependency{spec, depconfig.getManifest()};
-
+          m_manifest.resolved_dependencies[depStr] = ResolvedDependency{
+              spec, std::make_shared<ProjectManifest>(depconfig.getManifest())};
         } else if (isGitDep(depStr)) {
           return std::unexpected(
               "Direct 'git:' dependency URLs are no longer supported. Please "
@@ -272,9 +219,9 @@ Config::extractProjectData(GlobalOptions &ops) {
                 "https://github.com/L1TerminalFault/mokai_confs " +
                 registryDir.string();
             if (std::system(regCloneCmd.c_str()) != 0) {
-              return std::unexpected("Critical failure while downloading "
-                                     "dependencies metadata maps "
-                                     "from remote repository.");
+              return std::unexpected(
+                  "Critical failure while downloading dependencies metadata "
+                  "maps from remote repository.");
             }
           }
 
@@ -299,15 +246,16 @@ Config::extractProjectData(GlobalOptions &ops) {
             rStream << rFile.rdbuf();
 
             try {
-              auto rootRegistryNode = toml::parse(rStream.str());
-              std::string gitRepo = rootRegistryNode["project"]["git_repo"]
-                                        .value<std::string>()
-                                        .value_or("");
+              tom::Parser recipeParser;
+              recipeParser.parse(rStream.str());
+
+              std::string gitRepo =
+                  std::string(recipeParser.find_value("project", "git_repo"));
               if (gitRepo.empty()) {
-                return std::unexpected(std::format(
-                    "Registry manifest for '{}' is missing required 'git_repo' "
-                    "mapping.",
-                    pkgName));
+                return std::unexpected(
+                    std::format("Registry manifest for '{}' is missing "
+                                "required 'git_repo' mapping.",
+                                pkgName));
               }
 
               std::string packageGitUrl = gitRepo;
@@ -315,18 +263,15 @@ Config::extractProjectData(GlobalOptions &ops) {
                 packageGitUrl = "https://github.com/" + packageGitUrl;
               }
 
-              std::string recipeTomlContent = "";
-              if (auto *recipesTable = rootRegistryNode["recipes"].as_table()) {
-                if (auto specNode = recipesTable->get(pkgVersionSpec)) {
-                  recipeTomlContent =
-                      specNode->value<std::string>().value_or("");
-                } else if (auto latestNode = recipesTable->get("latest")) {
-                  recipeTomlContent =
-                      latestNode->value<std::string>().value_or("");
-                  Log::Warn(std::format(
-                      "Version '{}' not found for '{}'. Falling back to "
-                      "'latest'.",
-                      pkgVersionSpec, pkgName));
+              std::string recipeTomlContent = std::string(
+                  recipeParser.find_value("recipes", pkgVersionSpec));
+              if (recipeTomlContent.empty()) {
+                recipeTomlContent =
+                    std::string(recipeParser.find_value("recipes", "latest"));
+                if (!recipeTomlContent.empty()) {
+                  Log::Warn(std::format("Version '{}' not found for '{}'. "
+                                        "Falling back to 'latest'.",
+                                        pkgVersionSpec, pkgName));
                 }
               }
 
@@ -358,8 +303,9 @@ Config::extractProjectData(GlobalOptions &ops) {
 
               Config depconfig(targetPkgBuildDir.string(), ops);
               DependencySpec spec{depStr, pkgVersionSpec};
-              m_manifest.resolved_dependencies[pkgName] =
-                  ResolvedDependency{spec, depconfig.getManifest()};
+              m_manifest.resolved_dependencies[pkgName] = ResolvedDependency{
+                  spec,
+                  std::make_shared<ProjectManifest>(depconfig.getManifest())};
 
             } catch (const std::exception &e) {
               return std::unexpected(std::format(
@@ -374,174 +320,188 @@ Config::extractProjectData(GlobalOptions &ops) {
         }
       }
     }
+    // 2. [project.version_from] inline parser map
+    else if (field.scope == "project.version_from") {
+      if (field.key == "file")
+        metadata.version_from->file = field.value;
+      else if (field.key == "pattern")
+        metadata.version_from->pattern = field.value;
+    }
+    // 3. [options] block flag processing
+    else if (field.scope == "options") {
+      m_manifest.options[field.key] = (field.value == "true");
+    }
+    // 4. [compatibility] setup checks
+    else if (field.scope == "compatibility") {
+      if (field.key == "min_cpp_version")
+        m_manifest.compatibility->min_cpp_version = field.value;
+      else if (field.key == "preferred_cpp_version")
+        m_manifest.compatibility->preferred_cpp_version = field.value;
+    } else if (field.scope == "compatibility.unsupported_cpp_versions") {
+      m_manifest.compatibility->unsupported_cpp_versions.push_back(field.value);
+    } else if (field.scope == "compatibility.compilers.supported") {
+      m_manifest.compatibility->compilers.supported.push_back(field.value);
+    } else if (field.scope == "compatibility.compilers.unsupported") {
+      m_manifest.compatibility->compilers.unsupported.push_back(field.value);
+    }
+    // 5. Array Tables for file rules, property macros, and compilation flags
+    else if (field.scope.starts_with("group[")) {
+      size_t idx = std::stoul(field.scope.substr(6, field.scope.find(']') - 6));
+      if (m_manifest.file_groups.size() <= idx)
+        m_manifest.file_groups.resize(idx + 1);
+      if (field.key == "name")
+        m_manifest.file_groups[idx].name = field.value;
+      else if (field.key == "patterns")
+        m_manifest.file_groups[idx].patterns.push_back(field.value);
+    } else if (field.scope.starts_with("block[")) {
+      size_t idx = std::stoul(field.scope.substr(6, field.scope.find(']') - 6));
+      if (m_manifest.property_groups.size() <= idx)
+        m_manifest.property_groups.resize(idx + 1);
+      if (field.key == "name")
+        m_manifest.property_groups[idx].name = field.value;
+      else if (field.key == "condition")
+        m_manifest.property_groups[idx].condition = field.value;
+      else if (field.key == "defines")
+        m_manifest.property_groups[idx].defines.push_back(field.value);
+    } else if (field.scope.starts_with("hook[")) {
+      size_t idx = std::stoul(field.scope.substr(5, field.scope.find(']') - 5));
+      if (m_manifest.hooks.size() <= idx)
+        m_manifest.hooks.resize(idx + 1);
+      if (field.key == "name")
+        m_manifest.hooks[idx].name = field.value;
+      else if (field.key == "run")
+        m_manifest.hooks[idx].run = field.value;
+      else if (field.key == "target")
+        m_manifest.hooks[idx].target = field.value;
+      else if (field.key == "pattern")
+        m_manifest.hooks[idx].pattern = field.value;
+      else if (field.key == "on") {
+        if (field.value == "pre_build")
+          m_manifest.hooks[idx].trigger = HookTrigger::PreBuild;
+        else if (field.value == "post_build")
+          m_manifest.hooks[idx].trigger = HookTrigger::PostBuild;
+        else if (field.value == "pre_target_build")
+          m_manifest.hooks[idx].trigger = HookTrigger::PreTargetBuild;
+        else if (field.value == "post_target_build")
+          m_manifest.hooks[idx].trigger = HookTrigger::PostTargetBuild;
+        else if (field.value == "file_change")
+          m_manifest.hooks[idx].trigger = HookTrigger::FileChange;
+      }
+    }
+    // 6. Dynamic uniquely-named [target.<name>] structure blocks
+    else if (field.scope.starts_with("target.")) {
+      std::string_view sub = std::string_view(field.scope).substr(7);
+      size_t dot_pos = sub.find('.');
+      std::string t_name = std::string(
+          dot_pos == std::string_view::npos ? sub : sub.substr(0, dot_pos));
+
+      auto it = std::find_if(raw_targets.begin(), raw_targets.end(),
+                             [&](const auto &t) { return t.name == t_name; });
+      if (it == raw_targets.end()) {
+        Target new_tgt;
+        new_tgt.name = t_name;
+        raw_targets.push_back({t_name, new_tgt});
+        it = std::prev(raw_targets.end());
+      }
+
+      if (dot_pos == std::string_view::npos) {
+        if (field.key == "type") {
+          if (field.value == "executable")
+            it->tgt.type = TargetType::Executable;
+          else if (field.value == "static_library")
+            it->tgt.type = TargetType::StaticLibrary;
+          else if (field.value == "shared_library")
+            it->tgt.type = TargetType::SharedLibrary;
+        } else if (field.key == "sources")
+          it->tgt.sources.push_back(field.value);
+        else if (field.key == "include_dirs")
+          it->tgt.include_dirs.push_back(field.value);
+        else if (field.key == "properties")
+          it->tgt.properties.push_back(field.value);
+        else if (field.key == "flags")
+          it->tgt.flags.push_back(field.value);
+        else if (field.key == "system_libs")
+          it->tgt.system_libs.push_back(field.value);
+        else if (field.key == "depends_on")
+          it->tgt.depends_on.push_back(field.value);
+      }
+    }
+    // 7. [exports] dynamic library layout data
+    else if (field.scope == "exports") {
+      // Ensure the optional is initialized before writing to any fields
+      if (!m_manifest.exports.has_value()) {
+        m_manifest.exports = mokai::Exports{};
+      }
+
+      if (field.key == "default_targets")
+        m_manifest.exports->default_targets.push_back(field.value);
+      else if (field.key == "include_dirs")
+        m_manifest.exports->include_dirs.push_back(field.value);
+      else if (field.key == "defines_required")
+        m_manifest.exports->defines_required.push_back(field.value);
+      else if (field.key == "defines_optional")
+        m_manifest.exports->defines_optional.push_back(field.value);
+
+    } else if (field.scope.starts_with("exports.profile.")) {
+      // Ensure the optional is initialized here as well
+      if (!m_manifest.exports.has_value()) {
+        m_manifest.exports = mokai::Exports{};
+      }
+
+      std::string prof_name = field.scope.substr(16);
+      m_manifest.exports->profiles[prof_name].targets.push_back(field.value);
+    }
+    // 8. Output configurations
+    else if (field.scope == "output") {
+      if (field.key == "directory")
+        m_manifest.output.directory = field.value;
+    } else if (field.scope.starts_with("output.configs.")) {
+      std::string cfg_name = field.scope.substr(15);
+      if (field.key == "enabled")
+        m_manifest.output.configs[cfg_name].enabled = (field.value == "true");
+      else if (field.key == "subdir")
+        m_manifest.output.configs[cfg_name].subdir = field.value;
+    }
+  }
+
+  if (!has_project_header) {
+    return std::unexpected(
+        "Missing required [project] header inside the configuration file.");
+  }
+  if (metadata.name.empty()) {
+    return std::unexpected("Required field 'name' is missing or empty from the "
+                           "[project] configuration.");
+  }
+
+  // Validate standards strings are matching standard options sets
+  static const std::vector<std::string> known_versions{
+      "c++11", "c++14", "c++17", "c++20", "c++23", "c++26"};
+  if (metadata.cpp_version.empty())
+    metadata.cpp_version = "c++23";
+  if (!std::ranges::contains(known_versions, metadata.cpp_version)) {
+    return std::unexpected(std::format("Unsupported C++ standard version: '{}'",
+                                       metadata.cpp_version));
+  }
+
+  static const std::vector<std::string> known_c_versions{"c89", "c90", "c99",
+                                                         "c11", "c17", "c23"};
+  if (metadata.c_version.empty())
+    metadata.c_version = "c11";
+  if (!std::ranges::contains(known_c_versions, metadata.c_version)) {
+    return std::unexpected(std::format("Unsupported C standard version: '{}'",
+                                       metadata.c_version));
+  }
+
+  if (m_manifest.output.directory.empty()) {
+    m_manifest.output.directory = "./build";
+  }
+
+  // Finalize targets vector validation
+  for (auto &state : raw_targets) {
+    m_manifest.targets.push_back(std::move(state.tgt));
   }
 
   m_manifest.project = std::move(metadata);
-
-  if (auto *options_table = m_config_toml["options"].as_table()) {
-    for (auto &&[key, value] : *options_table) {
-      if (auto val = value.value<bool>()) {
-        m_manifest.options[std::string(key.str())] = *val;
-      }
-    }
-  }
-
-  if (auto *comp_table = m_config_toml["compatibility"].as_table()) {
-    Compatibility comp;
-    comp.min_cpp_version = (*comp_table)["min_cpp_version"].value_or("");
-    comp.preferred_cpp_version =
-        (*comp_table)["preferred_cpp_version"].value_or("");
-    extract_string_array((*comp_table)["unsupported_cpp_versions"],
-                         comp.unsupported_cpp_versions);
-    extract_string_array((*comp_table)["compilers"]["supported"],
-                         comp.compilers.supported);
-    extract_string_array((*comp_table)["compilers"]["unsupported"],
-                         comp.compilers.unsupported);
-    m_manifest.compatibility = std::move(comp);
-  }
-
-  if (auto *fg_table = m_config_toml["file_group"].as_table()) {
-    for (auto &&[key, value] : *fg_table) {
-      if (auto *inner_table = value.as_table()) {
-        FileGroup group;
-        group.name = std::string(key.str());
-        extract_string_array((*inner_table)["patterns"], group.patterns);
-        m_manifest.file_groups.push_back(std::move(group));
-      }
-    }
-  }
-
-  if (auto *pg_table = m_config_toml["property_group"].as_table()) {
-    for (auto &&[key, value] : *pg_table) {
-      if (auto *inner_table = value.as_table()) {
-        PropertyGroup group;
-        group.name = std::string(key.str());
-        extract_string_array((*inner_table)["defines"], group.defines);
-        if (auto cond = (*inner_table)["condition"].value<std::string>()) {
-          group.condition = std::move(*cond);
-        }
-        m_manifest.property_groups.push_back(std::move(group));
-      }
-    }
-  }
-
-  if (auto *target_table = m_config_toml["target"].as_table()) {
-    for (auto &&[key, value] : *target_table) {
-      if (auto *inner_table = value.as_table()) {
-        Target target;
-        target.name = std::string(key.str());
-
-        std::string type_str = (*inner_table)["type"].value_or("");
-        if (type_str == "executable") {
-          target.type = TargetType::Executable;
-        } else if (type_str == "static_library") {
-          target.type = TargetType::StaticLibrary;
-        } else if (type_str == "shared_library") {
-          target.type = TargetType::SharedLibrary;
-        } else {
-          return std::unexpected(std::format(
-              "Target '{}' specifies an invalid type. Supported types: "
-              "'executable', 'static_library', 'shared_library'.",
-              target.name));
-        }
-
-        extract_string_array((*inner_table)["sources"], target.sources);
-        extract_string_array((*inner_table)["include_dirs"],
-                             target.include_dirs);
-        extract_string_array((*inner_table)["properties"], target.properties);
-        extract_string_array((*inner_table)["flags"], target.flags);
-        extract_string_array((*inner_table)["system_libs"], target.system_libs);
-        extract_string_array((*inner_table)["depends_on"], target.depends_on);
-
-        m_manifest.targets.push_back(std::move(target));
-      }
-    }
-  }
-
-  if (auto *hook_table = m_config_toml["hook"].as_table()) {
-    for (auto &&[key, value] : *hook_table) {
-      if (auto *inner_table = value.as_table()) {
-        Hook hook;
-        hook.name = std::string(key.str());
-
-        std::string trigger_str = (*inner_table)["on"].value_or("");
-        if (trigger_str == "pre_build") {
-          hook.trigger = HookTrigger::PreBuild;
-        } else if (trigger_str == "post_build") {
-          hook.trigger = HookTrigger::PostBuild;
-        } else if (trigger_str == "pre_target_build") {
-          hook.trigger = HookTrigger::PreTargetBuild;
-        } else if (trigger_str == "post_target_build") {
-          hook.trigger = HookTrigger::PostTargetBuild;
-        } else if (trigger_str == "file_change") {
-          hook.trigger = HookTrigger::FileChange;
-        } else {
-          return std::unexpected(
-              std::format("Hook '{}' specifies an invalid 'on' trigger action.",
-                          hook.name));
-        }
-
-        hook.run = (*inner_table)["run"].value_or("");
-        if (hook.run.empty()) {
-          return std::unexpected(std::format(
-              "Hook '{}' is missing the required 'run' command parameter.",
-              hook.name));
-        }
-
-        if (auto tgt = (*inner_table)["target"].value<std::string>()) {
-          hook.target = std::move(*tgt);
-        }
-        if (auto pat = (*inner_table)["pattern"].value<std::string>()) {
-          hook.pattern = std::move(*pat);
-        }
-
-        m_manifest.hooks.push_back(std::move(hook));
-      }
-    }
-  }
-
-  if (auto *exports_table = m_config_toml["exports"].as_table()) {
-    Exports exp;
-    extract_string_array((*exports_table)["default_targets"],
-                         exp.default_targets);
-    if (exp.default_targets.empty()) {
-      return std::unexpected(
-          "The [exports] block layout requires the 'default_targets' list to "
-          "be specified.");
-    }
-
-    extract_string_array((*exports_table)["include_dirs"], exp.include_dirs);
-    extract_string_array((*exports_table)["defines_required"],
-                         exp.defines_required);
-    extract_string_array((*exports_table)["defines_optional"],
-                         exp.defines_optional);
-
-    if (auto *profile_table = (*exports_table)["profile"].as_table()) {
-      for (auto &&[key, value] : *profile_table) {
-        if (auto *inner_table = value.as_table()) {
-          ExportProfile profile;
-          extract_string_array((*inner_table)["targets"], profile.targets);
-          exp.profiles[std::string(key.str())] = std::move(profile);
-        }
-      }
-    }
-    m_manifest.exports = std::move(exp);
-  }
-
-  toml::node_view output_view = m_config_toml["output"];
-  m_manifest.output.directory = output_view["directory"].value_or("./build");
-
-  if (auto *configs_table = m_config_toml["output"]["configs"].as_table()) {
-    for (auto &&[key, value] : *configs_table) {
-      if (auto *cfg_table = value.as_table()) {
-        OutputProfile profile;
-        profile.enabled = (*cfg_table)["enabled"].value_or(true);
-        profile.subdir = (*cfg_table)["subdir"].value_or("");
-        m_manifest.output.configs[std::string(key.str())] = std::move(profile);
-      }
-    }
-  }
-
   return {};
 }
 
@@ -643,10 +603,9 @@ bool Config::runTarget(const std::string &targetName) {
   absoluteOutputBinPath /= targetName;
 
   if (!fs::exists(absoluteOutputBinPath)) {
-    Log::Error(std::format(
-        "Executable binary not found at: '{}'\nHint: Build the target before "
-        "executing it.",
-        absoluteOutputBinPath.string()));
+    Log::Error(std::format("Executable binary not found at: '{}'\nHint: Build "
+                           "the target before executing it.",
+                           absoluteOutputBinPath.string()));
     return false;
   }
 
@@ -684,9 +643,8 @@ FuzzyFindResult Config::fuzzyFindCloseFile(std::string &path) {
   fs::path parent = p.has_parent_path() ? p.parent_path() : fs::current_path();
   std::string filename = p.filename().string();
 
-  if (!fs::exists(parent)) {
+  if (!fs::exists(parent))
     return {false, ""};
-  }
 
   std::string best_match;
   size_t min_dist = 4;
@@ -704,9 +662,8 @@ FuzzyFindResult Config::fuzzyFindCloseFile(std::string &path) {
   } catch (...) {
   }
 
-  if (!best_match.empty()) {
+  if (!best_match.empty())
     return {true, best_match};
-  }
   return {false, ""};
 }
 
@@ -715,9 +672,8 @@ FuzzyFindResult Config::fuzzyFindCloseFolder(std::string &path) {
   fs::path parent = p.has_parent_path() ? p.parent_path() : fs::current_path();
   std::string folderName = p.filename().string();
 
-  if (!fs::exists(parent)) {
+  if (!fs::exists(parent))
     return {false, ""};
-  }
 
   std::string best_match;
   size_t min_dist = 4;
@@ -735,9 +691,8 @@ FuzzyFindResult Config::fuzzyFindCloseFolder(std::string &path) {
   } catch (...) {
   }
 
-  if (!best_match.empty()) {
+  if (!best_match.empty())
     return {true, best_match};
-  }
   return {false, ""};
 }
 

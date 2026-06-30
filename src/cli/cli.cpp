@@ -2,10 +2,9 @@
 #include "config/config.hpp"
 #include "core/os.hpp"
 #include "graph/graph.hpp"
+#include "graph/types.hpp"
 #include "log/log.h"
 #include "templates/template.hpp"
-#include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <expected>
 #include <filesystem>
@@ -13,10 +12,8 @@
 #include <fstream>
 #include <iostream>
 #include <print>
-#include <sstream>
 #include <string>
 #include <string_view>
-#include <variant>
 #include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -45,54 +42,133 @@ constexpr std::string_view Violet = "\033[35m";
 
 namespace dx {
 
+// Replaces <cctype> std::tolower with an inline ASCII branchless converter
+inline char toLowerAscii(char c) {
+  return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+}
+
+// Custom min for 3 values to replace <algorithm> std::min initializer_list
+// overload
+inline size_t min3(size_t a, size_t b, size_t c) {
+  size_t m = a;
+  if (b < m)
+    m = b;
+  if (c < m)
+    m = c;
+  return m;
+}
+
+// Lightweight Insertion Sort replacing <algorithm> std::sort template bloat
+static void sortStrings(std::vector<std::string> &vec) {
+  for (size_t i = 1; i < vec.size(); ++i) {
+    std::string key = std::move(vec[i]);
+    size_t j = i;
+    while (j > 0 && vec[j - 1] > key) {
+      vec[j] = std::move(vec[j - 1]);
+      --j;
+    }
+    vec[j] = std::move(key);
+  }
+}
+
+// Replaces <fstream> buffer streams by reading full file contents directly
+// using file sizing
+static std::string readFileToString(const fs::path &path) {
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file.is_open())
+    return "";
+  std::string content;
+  auto size = file.tellg();
+  if (size > 0) {
+    content.resize(static_cast<size_t>(size));
+    file.seekg(0, std::ios::beg);
+    file.read(&content[0], size);
+  }
+  return content;
+}
+
 static size_t calculateDistance(std::string_view s1, std::string_view s2) {
   const size_t len1 = s1.size(), len2 = s2.size();
   std::vector<std::vector<size_t>> d(len1 + 1, std::vector<size_t>(len2 + 1));
-  for (size_t i = 0; i <= len1; ++i) {
+  for (size_t i = 0; i <= len1; ++i)
     d[i][0] = i;
-  }
-  for (size_t j = 0; j <= len2; ++j) {
+  for (size_t j = 0; j <= len2; ++j)
     d[0][j] = j;
-  }
 
   for (size_t i = 1; i <= len1; ++i) {
     for (size_t j = 1; j <= len2; ++j) {
       size_t cost =
-          (std::tolower(s1[i - 1]) == std::tolower(s2[j - 1])) ? 0 : 1;
-      d[i][j] =
-          std::min({d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost});
+          (toLowerAscii(s1[i - 1]) == toLowerAscii(s2[j - 1])) ? 0 : 1;
+      d[i][j] = min3(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
     }
   }
   return d[len1][len2];
 }
 
-static std::string findClosestManifestMatch(const fs::path &dir) {
+static std::string formatHint(const std::string &hint_text) {
+  return "\n\n  Hint: " + hint_text;
+}
+
+static std::string
+findClosestMatch(std::string_view input,
+                 const std::vector<std::string_view> &options,
+                 size_t max_dist = 3) {
+  size_t min_dist = max_dist;
   std::string closest_match = "";
-  size_t min_distance = 4;
-
-  if (!fs::exists(dir) || !fs::is_directory(dir)) {
-    return "";
-  }
-
-  try {
-    for (const auto &entry : fs::directory_iterator(dir)) {
-      if (entry.is_regular_file()) {
-        std::string filename = entry.path().filename().string();
-        size_t dist = calculateDistance(filename, "mokai.toml");
-        if (dist < min_distance && dist > 0) {
-          min_distance = dist;
-          closest_match = filename;
-        }
-      }
+  for (const auto &opt : options) {
+    size_t dist = calculateDistance(opt, input);
+    if (dist < min_dist) {
+      min_dist = dist;
+      closest_match = opt;
     }
-  } catch (...) {
   }
-
   return closest_match;
 }
 
-static std::string formatHint(const std::string &hint_text) {
-  return "\n\n  Hint: " + hint_text;
+static std::string findClosestManifestMatch(const fs::path &dir) {
+  if (!fs::exists(dir) || !fs::is_directory(dir))
+    return "";
+  std::vector<std::string> files;
+  try {
+    for (const auto &entry : fs::directory_iterator(dir)) {
+      if (entry.is_regular_file())
+        files.push_back(entry.path().filename().string());
+    }
+  } catch (...) {
+    return "";
+  }
+
+  std::vector<std::string_view> sv_options;
+  sv_options.reserve(files.size());
+  for (const auto &f : files)
+    sv_options.push_back(f);
+  return findClosestMatch("mokai.toml", sv_options, 4);
+}
+
+static std::string toLower(std::string str) {
+  for (char &c : str)
+    c = toLowerAscii(c);
+  return str;
+}
+
+static void findAndReplaceOrInsert(std::string &content,
+                                   const std::string &target,
+                                   const std::string &fallback_section,
+                                   const std::string &insertion) {
+  size_t pos = content.find(target);
+  if (pos != std::string::npos) {
+    size_t end_line = content.find('\n', pos);
+    if (end_line != std::string::npos) {
+      content.replace(pos, end_line - pos, insertion);
+      return;
+    }
+  }
+  size_t sec_pos = content.find(fallback_section);
+  if (sec_pos != std::string::npos) {
+    content.insert(sec_pos + fallback_section.length(), "\n" + insertion);
+  } else {
+    content += "\n" + fallback_section + "\n" + insertion + "\n";
+  }
 }
 
 } // namespace dx
@@ -103,30 +179,25 @@ void Cli::initCommands() {
       [this](const std::vector<std::string> &args) {
         return handleBuild(args);
       }};
-
   m_supported_commands["run"] = {
       "run [target_name] [args...]", "Builds and executes a target binary.",
       [this](const std::vector<std::string> &args) { return handleRun(args); }};
-
   m_supported_commands["create"] = {
       "create [project_name]", "Scaffolds a clean C++ workspace directory.",
       [this](const std::vector<std::string> &args) {
         return handleCreateProject(args);
       }};
-
   m_supported_commands["add"] = {
       "add [package]",
       "Adds a registry or local path dependency to mokai.toml.",
       [this](const std::vector<std::string> &args) {
         return handlePackageAdd(args);
       }};
-
   m_supported_commands["help"] = {
       "help [command]", "Displays usage and details for build commands.",
       [this](const std::vector<std::string> &args) {
         return handleHelp(args);
       }};
-
   m_supported_commands["version"] = {
       "version", "Displays the current release version of the build engine.",
       [this](const std::vector<std::string> &args) {
@@ -169,10 +240,8 @@ int Cli::Run(int argc, char *argv[]) {
   }
 
   auto result = ParseCliArgs(argc, argv);
-
   if (!result.has_value()) {
     Log::Error(result.error().message);
-
     switch (result.error().code) {
     case CliError::Code::UnknownCommand:
       logSupportedCommands();
@@ -193,12 +262,10 @@ int Cli::Run(int argc, char *argv[]) {
 std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
                                                           char *argv[]) {
   PerfTimer timer;
-
   std::vector<std::string> rawArgs;
   rawArgs.reserve(argc - 1);
-  for (int i = 1; i < argc; ++i) {
+  for (int i = 1; i < argc; ++i)
     rawArgs.push_back(argv[i]);
-  }
 
   std::string command = "";
   std::vector<std::string> subCommandArgs;
@@ -206,72 +273,62 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
 
   for (size_t i = 0; i < rawArgs.size(); ++i) {
     const auto &arg = rawArgs[i];
-
-    if (arg == "-v" || arg == "--verbose") {
+    if (arg == "-v" || arg == "--verbose")
       m_options.verbosity = Verbosity::Verbose;
-    } else if (arg == "-q" || arg == "--quiet") {
+    else if (arg == "-q" || arg == "--quiet")
       m_options.verbosity = Verbosity::Quiet;
-    } else if (arg == "--release") {
+    else if (arg == "--release")
       m_options.profile = BuildProfile::RELEASE;
-    } else if (arg == "--debug") {
+    else if (arg == "--debug")
       m_options.profile = BuildProfile::DEBUG;
-    } else if (arg == "--minsizerel") {
+    else if (arg == "--minsizerel")
       m_options.profile = BuildProfile::MINSIZEREL;
-    } else if (arg == "--no-cache" || arg == "--clean") {
+    else if (arg == "--no-cache" || arg == "--clean")
       m_options.force_rebuild = true;
-    } else if (arg == "-j" || arg == "--jobs") {
-      if (i + 1 >= rawArgs.size()) {
+    else if (arg == "-j" || arg == "--jobs") {
+      if (i + 1 >= rawArgs.size())
         return std::unexpected(CliError{
             CliError::Code::InvalidArguments,
             "Option flag '" + arg + "' requires a numeric job count value"});
-      }
       try {
         m_options.job_count = std::stoi(rawArgs[++i]);
       } catch (...) {
-        return std::unexpected(CliError{CliError::Code::InvalidArguments,
-                                        "Invalid numeric value provided for "
-                                        "allocated jobs: '" +
-                                            rawArgs[i] + "'"});
+        return std::unexpected(
+            CliError{CliError::Code::InvalidArguments,
+                     "Invalid numeric value provided for allocated jobs: '" +
+                         rawArgs[i] + "'"});
       }
     } else if (arg == "--target") {
-      if (i + 1 >= rawArgs.size()) {
+      if (i + 1 >= rawArgs.size())
         return std::unexpected(CliError{
             CliError::Code::InvalidArguments,
             "Option flag '--target' requires a valid target filter name"});
-      }
       m_options.target_filter = rawArgs[++i];
-    } else if (arg == "--version" || arg == "-V") {
+    } else if (arg == "--version" || arg == "-V")
       command = "version";
-    } else if (arg == "-h" || arg == "--help") {
+    else if (arg == "-h" || arg == "--help")
       help_requested = true;
-    } else if (arg.starts_with("-")) {
+    else if (arg.starts_with("-"))
       return std::unexpected(
           CliError{CliError::Code::UnknownCommand,
                    "Unrecognized command option: '" + arg + "'"});
-    } else {
-      if (command.empty()) {
+    else {
+      if (command.empty())
         command = arg;
-      } else {
+      else
         subCommandArgs.push_back(arg);
-      }
     }
   }
   timer.Mark("CLI: Parsing Phase");
 
-  if (help_requested) {
-    if (command.empty()) {
-      logSupportedCommands();
-      return {};
-    } else {
-      return handleHelp({command});
-    }
-  }
-
-  if (command.empty()) {
+  if (help_requested)
+    return command.empty() ? (logSupportedCommands(),
+                              std::expected<std::monostate, CliError>{})
+                           : handleHelp({command});
+  if (command.empty())
     return std::unexpected(CliError{
         CliError::Code::UnknownCommand,
         "No operational command specified. Define an action to execute."});
-  }
 
   if (auto cmdToDispatch = m_supported_commands.find(command);
       cmdToDispatch != m_supported_commands.end()) {
@@ -280,19 +337,14 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
     return result;
   }
 
+  std::vector<std::string_view> cmd_options;
+  for (const auto &[name, _] : m_supported_commands)
+    cmd_options.push_back(name);
+  std::string closest_cmd = dx::findClosestMatch(command, cmd_options, 3);
+
   std::string err = "Unknown command: '" + command + "'";
-  size_t min_dist = 3;
-  std::string closest_cmd;
-  for (const auto &[cmd_name, _] : m_supported_commands) {
-    size_t dist = dx::calculateDistance(cmd_name, command);
-    if (dist < min_dist) {
-      min_dist = dist;
-      closest_cmd = cmd_name;
-    }
-  }
-  if (!closest_cmd.empty()) {
+  if (!closest_cmd.empty())
     err += dx::formatHint("Did you mean 'mokai " + closest_cmd + "'?");
-  }
   timer.Mark("CLI: Typo Resolution");
 
   return std::unexpected(CliError{CliError::Code::UnknownCommand, err});
@@ -300,7 +352,6 @@ std::expected<std::monostate, CliError> Cli::ParseCliArgs(int argc,
 
 Config *Cli::getConfig(const fs::path &tomlPath) {
   std::string pathStr = fs::absolute(tomlPath).lexically_normal().string();
-
   bool exists = fs::exists(tomlPath);
   fs::file_time_type current_time;
   if (exists) {
@@ -313,9 +364,8 @@ Config *Cli::getConfig(const fs::path &tomlPath) {
 
   auto it = m_config_registry.find(pathStr);
   if (it != m_config_registry.end()) {
-    if (exists && it->second.last_modified == current_time) {
+    if (exists && it->second.last_modified == current_time)
       return it->second.config.get();
-    }
     if (exists) {
       it->second.last_modified = current_time;
       it->second.config =
@@ -332,12 +382,10 @@ Config *Cli::getConfig(const fs::path &tomlPath) {
     entry.last_modified = current_time;
     entry.config =
         std::make_unique<Config>(tomlPath.parent_path().string(), m_options);
-
     auto [insertedIt, success] =
         m_config_registry.emplace(pathStr, std::move(entry));
     return insertedIt->second.config.get();
   }
-
   return nullptr;
 }
 
@@ -354,21 +402,16 @@ printWrapped(const std::string_view &text, size_t max_line_length = 80,
 
     if (len > current_limit) {
       size_t break_pt = text.rfind(' ', start + current_limit);
-
-      if (break_pt == std::string::npos || break_pt < start) {
+      if (break_pt == std::string::npos || break_pt < start)
         break_pt = start + current_limit;
-      }
-      if (!first_line) {
+      if (!first_line)
         std::print("{}", indent);
-      }
       std::println("{}", text.substr(start, break_pt - start));
-
       start = break_pt + 1;
       first_line = false;
     } else {
-      if (!first_line) {
+      if (!first_line)
         std::print("{}", indent);
-      }
       std::println("{}", text.substr(start));
       break;
     }
@@ -392,36 +435,31 @@ Cli::handleHelp(const std::vector<std::string> &args) {
   static const std::unordered_map<std::string_view, std::string_view>
       detailed_descriptions = {
           {"build",
-           "Compiles all project targets and dependencies matching "
-           "graph configurations. Automatically parses manifests, "
-           "handles glob-patterns, re-evaluates header updates, and "
-           "compiles object targets in parallel via system worker pools."},
+           "Compiles all project targets and dependencies matching graph "
+           "configurations. Automatically parses manifests, handles "
+           "glob-patterns, re-evaluates header updates, and compiles object "
+           "targets in parallel via system worker pools."},
           {"run",
-           "Builds and launches a compiled executable binary target. If "
-           "no target argument is specified, the default target configured "
-           "in mokai.toml is triggered automatically. Trailing arguments "
-           "are forwarded cleanly to the executing sub-process."},
+           "Builds and launches a compiled executable binary target. If no "
+           "target argument is specified, the default target configured in "
+           "mokai.toml is triggered automatically. Trailing arguments are "
+           "forwarded cleanly to the executing sub-process."},
           {"create",
-           "Launches the interactive initialization wizard to scaffold "
-           "a clean C++ workspace layout. Generates mokai.toml manifests, "
-           "file directories, main entrypoints, and initiates version "
-           "control."},
-          {"add",
-           "Resolves and links a dependency package. Checks matching versions "
-           "inside local and global package indexes, updates dependencies "
-           "blocks "
-           "inside local mokai.toml, and registers libraries with build "
-           "contexts."},
+           "Launches the interactive initialization wizard to scaffold a clean "
+           "C++ workspace layout. Generates mokai.toml manifests, file "
+           "directories, main entrypoints, and initiates version control."},
+          {"add", "Resolves and links a dependency package. Checks matching "
+                  "versions inside local and global package indexes, updates "
+                  "dependencies blocks inside local mokai.toml, and registers "
+                  "libraries with build contexts."},
           {"help",
            "Displays explicit parameter limits, operational details, option "
            "flag usage, and description overviews for each build action."},
           {"version",
            "Logs the current release flag version of the build tool."}};
 
-  std::string_view cmd = args[0];
-  if (cmd == "--version") {
-    cmd = "version";
-  }
+  std::string_view cmd =
+      (args[0] == "--version") ? "version" : std::string_view(args[0]);
 
   if (auto help = m_supported_commands.find(std::string(cmd));
       help != m_supported_commands.end()) {
@@ -431,26 +469,20 @@ Cli::handleHelp(const std::vector<std::string> &args) {
 
     std::string_view explanation = help->second.explanation;
     if (auto it = detailed_descriptions.find(cmd);
-        it != detailed_descriptions.end()) {
+        it != detailed_descriptions.end())
       explanation = it->second;
-    }
 
     printWrapped(explanation, 80, "          ");
     return {};
   } else {
+    std::vector<std::string_view> cmd_options;
+    for (const auto &[name, _] : m_supported_commands)
+      cmd_options.push_back(name);
+    std::string closest_cmd = dx::findClosestMatch(args[0], cmd_options, 3);
+
     std::string err = "Command not found: '" + args[0] + "'";
-    size_t min_dist = 3;
-    std::string closest_cmd;
-    for (const auto &[cmd_name, _] : m_supported_commands) {
-      size_t dist = dx::calculateDistance(cmd_name, args[0]);
-      if (dist < min_dist) {
-        min_dist = dist;
-        closest_cmd = cmd_name;
-      }
-    }
-    if (!closest_cmd.empty()) {
+    if (!closest_cmd.empty())
       err += dx::formatHint("Did you mean to run 'help " + closest_cmd + "'?");
-    }
     return std::unexpected(CliError{CliError::Code::UnknownCommand, err});
   }
 }
@@ -458,7 +490,6 @@ Cli::handleHelp(const std::vector<std::string> &args) {
 std::expected<std::monostate, CliError>
 Cli::handleBuild(const std::vector<std::string> &args) {
   fs::path workingDir = args.empty() ? fs::current_path() : fs::path(args[0]);
-
   if (!fs::exists(workingDir) || !fs::is_directory(workingDir)) {
     return std::unexpected(
         CliError{CliError::Code::InvalidWorkspace,
@@ -466,20 +497,17 @@ Cli::handleBuild(const std::vector<std::string> &args) {
   }
 
   workingDir = fs::absolute(workingDir).lexically_normal();
-
   Config *currentConfig = getConfig(workingDir / "mokai.toml");
 
-  if (!currentConfig || !currentConfig->getManifest()) {
+  if (!currentConfig) {
     std::string err =
         "Could not find a valid 'mokai.toml' file in: " + workingDir.string();
-
     std::string closest = dx::findClosestManifestMatch(workingDir);
-    if (!closest.empty()) {
-      err += dx::formatHint("A file named '" + closest +
-                            "' was found. Correct the typo if necessary.");
-    } else {
-      err += dx::formatHint("Run 'mokai create' to generate a new project.");
-    }
+    err +=
+        !closest.empty()
+            ? dx::formatHint("A file named '" + closest +
+                             "' was found. Correct the typo if necessary.")
+            : dx::formatHint("Run 'mokai create' to generate a new project.");
     return std::unexpected(CliError{CliError::Code::InvalidWorkspace, err});
   }
 
@@ -488,7 +516,9 @@ Cli::handleBuild(const std::vector<std::string> &args) {
                           OS::GetPlatformName()));
   }
 
-  auto graph_result = Graph::Create(currentConfig->getManifest(), m_options);
+  auto graph_result = Graph::Create(
+      std::make_shared<ProjectManifest>(currentConfig->getManifest()),
+      m_options);
   if (!graph_result) {
     Log::Error("Failed to initialize build dependency graph: " +
                graph_result.error());
@@ -496,37 +526,31 @@ Cli::handleBuild(const std::vector<std::string> &args) {
   }
 
   Graph graph = std::move(graph_result.value());
-
   auto buildOrder = graph.computeBuildOrder(graph.getEdges());
-  if (buildOrder.empty()) {
+  if (buildOrder.empty())
     return std::unexpected(
         CliError{CliError::Code::BuildFailed,
                  "Cyclic or invalid target dependencies detected."});
-  }
-  if (!graph.BuildAllTree(buildOrder)) {
+  if (!graph.BuildAllTree(buildOrder))
     return std::unexpected(
         CliError{CliError::Code::BuildFailed,
                  "Compilation sequence aborted due to errors."});
-  }
 
-  if (m_options.verbosity != Verbosity::Quiet) {
+  if (m_options.verbosity != Verbosity::Quiet)
     Log::Success("Build completed successfully.");
-  }
   return {};
 }
 
 std::expected<std::monostate, CliError>
 Cli::handleRun(const std::vector<std::string> &args) {
   fs::path workingDir = fs::current_path();
-
   Config *currentConfig = getConfig(workingDir / "mokai.toml");
-  if (!currentConfig || !currentConfig->getManifest()) {
+  if (!currentConfig) {
     std::string err = "Workspace manifest context not found.";
     std::string closest = dx::findClosestManifestMatch(workingDir);
-    if (!closest.empty()) {
+    if (!closest.empty())
       err += dx::formatHint("A file named '" + closest +
                             "' was found. Correct the typo if necessary.");
-    }
     return std::unexpected(CliError{CliError::Code::InvalidWorkspace, err});
   }
 
@@ -536,7 +560,7 @@ Cli::handleRun(const std::vector<std::string> &args) {
 
   if (!args.empty() && !args[0].starts_with("-")) {
     std::string explicitTargetName = args[0];
-    for (const auto &target : manifest->targets) {
+    for (const auto &target : manifest.targets) {
       if (target.name == explicitTargetName) {
         chosenTarget = &target;
         break;
@@ -544,35 +568,29 @@ Cli::handleRun(const std::vector<std::string> &args) {
     }
 
     if (!chosenTarget) {
+      std::vector<std::string_view> target_options;
+      for (const auto &t : manifest.targets)
+        target_options.push_back(t.name);
+      std::string closest_target =
+          dx::findClosestMatch(explicitTargetName, target_options, 4);
+
       std::string err =
           "No target named '" + explicitTargetName + "' inside mokai.toml.";
-      size_t min_dist = 4;
-      std::string closest_target;
-      for (const auto &target : manifest->targets) {
-        size_t dist = dx::calculateDistance(target.name, explicitTargetName);
-        if (dist < min_dist) {
-          min_dist = dist;
-          closest_target = target.name;
-        }
-      }
-      if (!closest_target.empty()) {
+      if (!closest_target.empty())
         err += dx::formatHint("Did you mean target '" + closest_target + "'?");
-      }
       return std::unexpected(CliError{CliError::Code::InvalidArguments, err});
     }
-
-    for (size_t i = 1; i < args.size(); ++i) {
+    for (size_t i = 1; i < args.size(); ++i)
       forwardArgs.push_back(args[i]);
-    }
   } else {
-    for (const auto &target : manifest->targets) {
+    for (const auto &target : manifest.targets) {
       if (target.is_default && target.type == TargetType::Executable) {
         chosenTarget = &target;
         break;
       }
     }
     if (!chosenTarget) {
-      for (const auto &target : manifest->targets) {
+      for (const auto &target : manifest.targets) {
         if (target.type == TargetType::Executable) {
           chosenTarget = &target;
           break;
@@ -582,23 +600,20 @@ Cli::handleRun(const std::vector<std::string> &args) {
     forwardArgs = args;
   }
 
-  if (!chosenTarget) {
+  if (!chosenTarget)
     return std::unexpected(
         CliError{CliError::Code::InvalidArguments,
                  "No executable target maps found inside the manifest."});
-  }
-
   if (chosenTarget->type != TargetType::Executable) {
-    std::string err =
-        "Target '" + chosenTarget->name + "' is not an executable type.";
-    err += dx::formatHint("Libraries cannot be executed directly.");
-    return std::unexpected(CliError{CliError::Code::InvalidArguments, err});
+    return std::unexpected(CliError{
+        CliError::Code::InvalidArguments,
+        "Target '" + chosenTarget->name + "' is not an executable type." +
+            dx::formatHint("Libraries cannot be executed directly.")});
   }
 
   auto buildRes = handleBuild({});
-  if (!buildRes.has_value()) {
+  if (!buildRes.has_value())
     return buildRes;
-  }
 
   std::string profileFolder =
       (m_options.profile == BuildProfile::RELEASE) ? "release" : "debug";
@@ -610,151 +625,133 @@ Cli::handleRun(const std::vector<std::string> &args) {
 #endif
 
   if (!fs::exists(binaryPath)) {
-    return std::unexpected(std::unexpected(CliError{
+    return std::unexpected(CliError{
         CliError::Code::GeneralFailure,
-        "Compiled target binary not found at path: " + binaryPath.string()}));
+        "Compiled target binary not found at path: " + binaryPath.string()});
   }
 
-  if (m_options.verbosity != Verbosity::Quiet) {
+  if (m_options.verbosity != Verbosity::Quiet)
     Log::Info(std::format("Executing target binary: {}", binaryPath.string()));
-  }
 
   std::string execCommand = binaryPath.string();
-  for (const auto &fArg : forwardArgs) {
+  for (const auto &fArg : forwardArgs)
     execCommand += " " + fArg;
-  }
 
   std::unordered_map<std::string, std::string> emptyEnv;
   int runtimeExitCode = OS::ExecuteCommand(execCommand, emptyEnv);
-
-  if (runtimeExitCode != 0) {
+  if (runtimeExitCode != 0)
     Log::Error(std::format("Process terminated with non-zero exit code: {}",
                            runtimeExitCode));
-  }
 
   return {};
 }
 
+struct TerminalRawGuard {
+#if !defined(_WIN32) && !defined(_WIN64)
+  struct termios orig;
+  TerminalRawGuard() {
+    tcgetattr(STDIN_FILENO, &orig);
+    struct termios raw = orig;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+  }
+  ~TerminalRawGuard() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig); }
+#else
+  TerminalRawGuard() {}
+  ~TerminalRawGuard() {}
+#endif
+};
+
 static size_t promptChoice(const std::string &title,
                            const std::vector<std::string> &options,
                            size_t default_idx = 0) {
-  if (options.empty()) {
+  if (options.empty())
     return 0;
-  }
-
   size_t current_idx = default_idx;
   const size_t max_visible = 5;
   bool selecting = true;
   bool first_render = true;
 
-#if !defined(_WIN32) && !defined(_WIN64)
-  struct termios orig_termios;
-  tcgetattr(STDIN_FILENO, &orig_termios);
-  struct termios raw = orig_termios;
-  raw.c_lflag &= ~(ICANON | ECHO);
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-#endif
-
   std::print("\033[?25l");
-
-  while (selecting) {
-    size_t start_idx = 0;
-    if (current_idx >= max_visible) {
-      start_idx = current_idx - max_visible + 1;
-    }
-
-    if (!first_render) {
-      size_t lines_to_clear = std::min(options.size(), max_visible) + 2;
-      for (size_t i = 0; i < lines_to_clear; ++i) {
-        std::print("\033[A\033[2K");
+  {
+    TerminalRawGuard raw_mode_guard;
+    while (selecting) {
+      size_t start_idx =
+          (current_idx >= max_visible) ? (current_idx - max_visible + 1) : 0;
+      if (!first_render) {
+        size_t lines_to_clear = std::min(options.size(), max_visible) + 2;
+        for (size_t i = 0; i < lines_to_clear; ++i)
+          std::print("\033[A\033[2K");
       }
-    }
-    first_render = false;
+      first_render = false;
 
-    std::println("{}{} (Select using arrow keys or j/k){}", Color::Violet,
-                 title, Color::Reset);
-
-    for (size_t i = start_idx;
-         i < std::min(options.size(), start_idx + max_visible); ++i) {
-      if (i == current_idx) {
-        std::println("  > {}", options[i]);
-      } else {
-        std::println("    {}", options[i]);
+      std::println("{}{} (Select using arrow keys or j/k){}", Color::Violet,
+                   title, Color::Reset);
+      for (size_t i = start_idx;
+           i < std::min(options.size(), start_idx + max_visible); ++i) {
+        std::println("{}", (i == current_idx)
+                               ? std::format("  > {}", options[i])
+                               : std::format("    {}", options[i]));
       }
-    }
 
-    std::print("  (Use up/down to navigate, Enter to select");
-    if (options.size() > max_visible) {
-      std::print(" | item {}/{}", (current_idx + 1), options.size());
-    }
-    std::println(")");
-    std::fflush(stdout);
+      std::print("  (Use up/down to navigate, Enter to select");
+      if (options.size() > max_visible)
+        std::print(" | item {}/{}", (current_idx + 1), options.size());
+      std::println(")");
+      std::fflush(stdout);
 
 #if defined(_WIN32) || defined(_WIN64)
-    int ch = _getch();
-    if (ch == 0 || ch == 0xE0) {
-      ch = _getch();
-      if (ch == 72 && current_idx > 0) {
-        current_idx--;
-      } else if (ch == 80 && current_idx < options.size() - 1) {
-        current_idx++;
-      }
-    } else if (ch == '\r' || ch == '\n') {
-      selecting = false;
-    } else if (ch == 'k' && current_idx > 0) {
-      current_idx--;
-    } else if (ch == 'j' && current_idx < options.size() - 1) {
-      current_idx++;
-    } else if (ch == 3) {
-      std::print("\033[?25h");
-      std::println("Interrupted.");
-      std::exit(130);
-    }
-#else
-    char ch;
-    if (read(STDIN_FILENO, &ch, 1) == 1) {
-      if (ch == '\n' || ch == '\r') {
-        selecting = false;
-      } else if (ch == 'k') {
-        if (current_idx > 0) {
+      int ch = _getch();
+      if (ch == 0 || ch == 0xE0) {
+        ch = _getch();
+        if (ch == 72 && current_idx > 0)
           current_idx--;
-        }
-      } else if (ch == 'j') {
-        if (current_idx < options.size() - 1) {
+        else if (ch == 80 && current_idx < options.size() - 1)
           current_idx++;
-        }
-      } else if (ch == '\033') {
-        char seq[2];
-        if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
-            read(STDIN_FILENO, &seq[1], 1) == 1) {
-          if (seq[0] == '[') {
-            if (seq[1] == 'A' && current_idx > 0) {
-              current_idx--;
-            } else if (seq[1] == 'B' && current_idx < options.size() - 1) {
-              current_idx++;
-            }
-          }
-        }
-      } else if (ch == 3) {
+      } else if (ch == '\r' || ch == '\n')
+        selecting = false;
+      else if (ch == 'k' && current_idx > 0)
+        current_idx--;
+      else if (ch == 'j' && current_idx < options.size() - 1)
+        current_idx++;
+      else if (ch == 3) {
         std::print("\033[?25h");
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
         std::println("Interrupted.");
         std::exit(130);
       }
-    }
+#else
+      char ch;
+      if (read(STDIN_FILENO, &ch, 1) == 1) {
+        if (ch == '\n' || ch == '\r')
+          selecting = false;
+        else if (ch == 'k' && current_idx > 0)
+          current_idx--;
+        else if (ch == 'j' && current_idx < options.size() - 1)
+          current_idx++;
+        else if (ch == '\033') {
+          char seq[2];
+          if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+              read(STDIN_FILENO, &seq[1], 1) == 1) {
+            if (seq[0] == '[' && seq[1] == 'A' && current_idx > 0)
+              current_idx--;
+            else if (seq[0] == '[' && seq[1] == 'B' &&
+                     current_idx < options.size() - 1)
+              current_idx++;
+          }
+        } else if (ch == 3) {
+          std::print("\033[?25h");
+          std::println("Interrupted.");
+          std::exit(130);
+        }
+      }
 #endif
+    }
   }
 
   std::print("\033[?25h");
-#if !defined(_WIN32) && !defined(_WIN64)
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-#endif
-
   size_t lines_to_clear = std::min(options.size(), max_visible) + 2;
-  for (size_t i = 0; i < lines_to_clear; ++i) {
+  for (size_t i = 0; i < lines_to_clear; ++i)
     std::print("\033[A\033[2K");
-  }
-
   std::println("{}> {}: {}{}", Color::Violet, title, options[current_idx],
                Color::Reset);
 
@@ -764,18 +761,15 @@ static size_t promptChoice(const std::string &title,
 static std::string promptText(const std::string &prompt,
                               const std::string &default_val = "") {
   std::print("{}> {}{}", Color::Violet, prompt, Color::Reset);
-  if (!default_val.empty()) {
+  if (!default_val.empty())
     std::print(" ({})", default_val);
-  }
   std::print(": ");
   std::fflush(stdout);
 
   std::string input;
   std::getline(std::cin, input);
-
   input.erase(0, input.find_first_not_of(" \t\r\n"));
   input.erase(input.find_last_not_of(" \t\r\n") + 1);
-
   return input.empty() ? default_val : input;
 }
 
@@ -786,21 +780,18 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
     std::string err =
         "Manifest context not found inside current root directories.";
     std::string closest = dx::findClosestManifestMatch(fs::current_path());
-    if (!closest.empty()) {
+    if (!closest.empty())
       err += dx::formatHint("Found similar file '" + closest +
                             "'. Check file name for typos.");
-    }
     return std::unexpected(CliError{CliError::Code::InvalidWorkspace, err});
   }
 
   std::string chosenPackage = "";
-
   if (!args.empty()) {
     chosenPackage = args[0];
   } else {
     fs::path registryDir =
         OS::GetTemporaryDirectory().parent_path() / ".mokai" / "registry";
-
     if (!fs::exists(registryDir) || fs::is_empty(registryDir)) {
       Log::Warn("Package index uninitialized. Build target to sync files.");
       chosenPackage =
@@ -808,11 +799,10 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
     } else {
       std::vector<std::string> availablePackages;
       for (const auto &entry : fs::directory_iterator(registryDir)) {
-        if (!entry.is_directory() && entry.path().extension() == ".toml") {
+        if (!entry.is_directory() && entry.path().extension() == ".toml")
           availablePackages.push_back(entry.path().stem().string());
-        }
       }
-      std::sort(availablePackages.begin(), availablePackages.end());
+      dx::sortStrings(availablePackages);
 
       if (availablePackages.empty()) {
         chosenPackage = promptText(
@@ -823,11 +813,8 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
             0);
         std::string pkgName = availablePackages[pkgIdx];
 
-        fs::path regFile = registryDir / (pkgName + ".toml");
-        std::ifstream rFile(regFile.string());
-        std::stringstream rStream;
-        rStream << rFile.rdbuf();
-        std::string rContent = rStream.str();
+        std::string rContent =
+            dx::readFileToString(registryDir / (pkgName + ".toml"));
 
         std::vector<std::string> constraintOptions;
         size_t pos = 0;
@@ -839,10 +826,15 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
             if (quoteEnd != std::string::npos) {
               std::string vRange =
                   rContent.substr(quoteStart + 1, quoteEnd - quoteStart - 1);
-              if (std::ranges::find(constraintOptions, vRange) ==
-                  constraintOptions.end()) {
-                constraintOptions.push_back(vRange);
+              bool duplicate = false;
+              for (const auto &opt : constraintOptions) {
+                if (opt == vRange) {
+                  duplicate = true;
+                  break;
+                }
               }
+              if (!duplicate)
+                constraintOptions.push_back(vRange);
             }
           }
           pos += 13;
@@ -878,46 +870,28 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
     }
   }
 
-  if (chosenPackage.empty()) {
+  if (chosenPackage.empty())
     return std::unexpected(
         CliError{CliError::Code::PackageNotFound,
                  "Aborted package resolution: Empty package specifier."});
-  }
 
-  std::ifstream inFile(tomlPath.string());
-  std::stringstream buffer;
-  buffer << inFile.rdbuf();
-  std::string tomlContent = buffer.str();
-  inFile.close();
-
+  std::string tomlContent = dx::readFileToString(tomlPath);
   size_t depPos = tomlContent.find("dependencies = [");
   if (depPos != std::string::npos) {
     size_t closeBrace = tomlContent.find(']', depPos);
-    if (closeBrace != std::string::npos) {
-      std::string insertion = "\n    \"" + chosenPackage + "\",";
-      tomlContent.insert(closeBrace, insertion);
-    }
+    if (closeBrace != std::string::npos)
+      tomlContent.insert(closeBrace, "\n    \"" + chosenPackage + "\",");
   } else {
-    size_t projPos = tomlContent.find("[project]");
-    if (projPos != std::string::npos) {
-      size_t nextLine = tomlContent.find('\n', projPos);
-      std::string insertion =
-          "\ndependencies = [\n    \"" + chosenPackage + "\"\n]\n";
-      if (nextLine != std::string::npos) {
-        tomlContent.insert(nextLine + 1, insertion);
-      } else {
-        tomlContent += insertion;
-      }
-    } else {
-      tomlContent +=
-          "\n[project]\ndependencies = [\n    \"" + chosenPackage + "\"\n]\n";
-    }
+    dx::findAndReplaceOrInsert(tomlContent, "dependencies = [", "[project]",
+                               "dependencies = [\n    \"" + chosenPackage +
+                                   "\"\n]");
   }
 
-  std::ofstream outFile(tomlPath.string());
-  outFile << tomlContent;
-  outFile.close();
-
+  std::ofstream outFile(tomlPath.string(), std::ios::binary);
+  if (outFile.is_open()) {
+    outFile << tomlContent;
+    outFile.close();
+  }
   Log::Success(std::format("Successfully injected target dependency: {}",
                            chosenPackage));
   return {};
@@ -926,7 +900,6 @@ Cli::handlePackageAdd(const std::vector<std::string> &args) {
 std::expected<std::monostate, CliError>
 Cli::handleCreateProject(const std::vector<std::string> &args) {
   std::string project_name;
-
   std::println("\n{}Mokai Project Scaffolding{}", Color::Violet, Color::Reset);
   std::println("{}====================================={}", Color::Dim,
                Color::Reset);
@@ -940,7 +913,6 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   }
 
   fs::path target_dir = fs::current_path() / project_name;
-
   if (fs::exists(target_dir)) {
     return std::unexpected(
         CliError{CliError::Code::InvalidArguments,
@@ -957,14 +929,12 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   if (chosen_lang == "C++") {
     std::vector<std::string> cpp_standards = {"C++11", "C++14", "C++17",
                                               "C++20", "C++23", "C++26"};
-    size_t std_idx =
-        promptChoice("Select C++ standard specification", cpp_standards, 4);
-    chosen_std = cpp_standards[std_idx];
+    chosen_std = cpp_standards[promptChoice("Select C++ standard specification",
+                                            cpp_standards, 4)];
   } else {
     std::vector<std::string> c_standards = {"C89", "C99", "C11", "C17", "C23"};
-    size_t std_idx =
-        promptChoice("Select C standard specification", c_standards, 2);
-    chosen_std = c_standards[std_idx];
+    chosen_std = c_standards[promptChoice("Select C standard specification",
+                                          c_standards, 2)];
   }
 
   TemplateGen template_engine;
@@ -972,27 +942,33 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
   std::string chosen_template = "default";
   if (!raw_available.empty()) {
     std::vector<std::string> available_templates;
-    for (const auto &[name, desc] : raw_available) {
+    for (const auto &[name, desc] : raw_available)
       available_templates.push_back(name + " (" + desc + ")");
+    dx::sortStrings(available_templates);
+
+    // Remap index matching after sorting
+    for (size_t i = 0; i < raw_available.size(); ++i) {
+      if (available_templates
+              [promptChoice(
+                   "Select matching embedded layout blueprint template",
+                   available_templates, 0)]
+                  .starts_with(raw_available[i].first)) {
+        chosen_template = raw_available[i].first;
+        break;
+      }
     }
-    std::sort(available_templates.begin(), available_templates.end());
-    size_t template_idx =
-        promptChoice("Select matching embedded layout blueprint template",
-                     available_templates, 0);
-    chosen_template = raw_available[template_idx].first;
   }
 
   std::vector<std::string> git_options = {"Yes", "No"};
-  size_t git_idx = promptChoice(
-      "Initialize default git repository control index?", git_options, 0);
-  bool init_git = (git_idx == 0);
+  bool init_git =
+      (promptChoice("Initialize default git repository control index?",
+                    git_options, 0) == 0);
 
   std::print("\nSpawning project workspace layout...\r");
   std::fflush(stdout);
 
-  std::string std_for_creation = (chosen_lang == "C++") ? chosen_std : "c++23";
-  std::transform(std_for_creation.begin(), std_for_creation.end(),
-                 std_for_creation.begin(), ::tolower);
+  std::string std_for_creation =
+      dx::toLower((chosen_lang == "C++") ? chosen_std : "c++23");
 
   if (!template_engine.create(chosen_template, target_dir, project_name,
                               std_for_creation)) {
@@ -1007,93 +983,41 @@ Cli::handleCreateProject(const std::vector<std::string> &args) {
                        clean_env);
     std::ofstream gitignore(target_dir / ".gitignore");
     if (gitignore.is_open()) {
-      gitignore << "build/\n"
-                << "obj/\n"
-                << ".mokai/\n"
-                << "compile_commands.json\n"
-                << "*.o\n"
-                << "*.obj\n"
-                << "*.a\n"
-                << "*.lib\n"
-                << "*.so\n"
-                << "*.dll\n"
-                << "*.dylib\n"
-                << "*.exe\n"
-                << "*.d\n"
-                << ".vscode/\n"
-                << ".vs/\n"
-                << "out/\n";
+      gitignore << "build/\nobj/\n.mokai/"
+                   "\ncompile_commands.json\n*.o\n*.obj\n*.a\n*.lib\n*.so\n*."
+                   "dll\n*.dylib\n*.exe\n*.d\n.vscode/\n.vs/\nout/\n";
       gitignore.close();
     }
   }
 
   fs::path toml_path = target_dir / "mokai.toml";
-  if (fs::exists(toml_path)) {
-    std::ifstream toml_in(toml_path);
-    if (toml_in.is_open()) {
-      std::stringstream ss;
-      ss << toml_in.rdbuf();
-      std::string content = ss.str();
-      toml_in.close();
-
-      std::string std_val = chosen_std;
-      std::transform(std_val.begin(), std_val.end(), std_val.begin(),
-                     ::tolower);
-
-      if (chosen_lang == "C++") {
-        size_t cpp_pos = content.find("cpp_version =");
-        if (cpp_pos != std::string::npos) {
-          size_t end_line = content.find('\n', cpp_pos);
-          if (end_line != std::string::npos) {
-            content.replace(cpp_pos, end_line - cpp_pos,
-                            std::format("cpp_version = \"{}\"", std_val));
-          }
-        } else {
-          size_t proj_pos = content.find("[project]");
-          if (proj_pos != std::string::npos) {
-            content.insert(proj_pos + 9,
-                           std::format("\ncpp_version = \"{}\"", std_val));
-          }
-        }
-      } else {
-        size_t c_pos = content.find("c_version =");
-        if (c_pos != std::string::npos) {
-          size_t end_line = content.find('\n', c_pos);
-          if (end_line != std::string::npos) {
-            content.replace(c_pos, end_line - c_pos,
-                            std::format("c_version = \"{}\"", std_val));
-          }
-        } else {
-          size_t proj_pos = content.find("[project]");
-          if (proj_pos != std::string::npos) {
-            content.insert(proj_pos + 9,
-                           std::format("\nc_version = \"{}\"", std_val));
-          }
-        }
-      }
-
-      std::ofstream toml_out(toml_path);
-      if (toml_out.is_open()) {
-        toml_out << content;
-        toml_out.close();
-      }
+  std::string content = dx::readFileToString(toml_path);
+  if (!content.empty()) {
+    std::string std_val = dx::toLower(chosen_std);
+    if (chosen_lang == "C++") {
+      dx::findAndReplaceOrInsert(content, "cpp_version =", "[project]",
+                                 std::format("cpp_version = \"{}\"", std_val));
+    } else {
+      dx::findAndReplaceOrInsert(content, "c_version = ", "[project]",
+                                 std::format("c_version = \"{}\"", std_val));
+    }
+    std::ofstream toml_out(toml_path, std::ios::binary);
+    if (toml_out.is_open()) {
+      toml_out << content;
+      toml_out.close();
     }
   }
 
   Log::Success("Project workspace generated successfully.");
-  std::println("");
-  std::println("  {}Location:        {}{}", Color::Violet, Color::Reset,
-               target_dir.string());
-  std::println("  {}Language Family: {}{}", Color::Violet, Color::Reset,
-               chosen_lang);
-  std::println("  {}Specification:   {}{}", Color::Violet, Color::Reset,
-               chosen_std);
-  std::println("  {}Template:        {}{}", Color::Violet, Color::Reset,
-               chosen_template);
-  std::println("");
-  std::println("  Navigate and trigger a compilation build via:");
-  std::println("  {}cd {}{}", Color::Cyan, project_name, Color::Reset);
-  std::println("  {}mokai build{}", Color::Cyan, Color::Reset);
+  std::println("\n  {}Location:        {}{}\n  {}Language Family: {}{}\n  "
+               "{}Specification:   {}{}\n  {}Template:        {}{}\n",
+               Color::Violet, Color::Reset, target_dir.string(), Color::Violet,
+               Color::Reset, chosen_lang, Color::Violet, Color::Reset,
+               chosen_std, Color::Violet, Color::Reset, chosen_template);
+  std::println("  Navigate and trigger a compilation build via:\n  {}cd {}{}\n "
+               " {}mokai build{}",
+               Color::Cyan, project_name, Color::Reset, Color::Cyan,
+               Color::Reset);
 
   return {};
 }
@@ -1103,7 +1027,6 @@ void Cli::logSupportedCommands() {
   auto print_cmd = [](std::string_view name, std::string_view desc) {
     std::println("  {}{:<10}{} - {}", Color::Violet, name, Color::Reset, desc);
   };
-
   print_cmd("add", "Adds a registry or local path dependency to mokai.toml.");
   print_cmd("build", "Compiles all dependencies and targets in parallel.");
   print_cmd("create", "Scaffolds a clean C++ workspace directory.");
